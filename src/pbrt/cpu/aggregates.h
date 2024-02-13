@@ -149,15 +149,17 @@ class StackItem {
     float tMax;
 };
 
-float determineSAH(std::vector<int> &nodeComposition, std::vector<float> &nodesPlanes,
+float determineSAH(std::vector<int> &nodeComposition, std::vector<float> &nodesPlanes, std::vector<Bounds3f> &nodesBounds, 
                    Bounds3f parentBB, Bounds3f childBB, int positionOfNextNode, float S);
 float carveFiveSides(const std::vector<int> sidesToCarve,
-                     std::vector<int> &nodeComposition, std::vector<float> &nodesPlanes,
+                     std::vector<int> &nodeComposition,
+                      std::vector<float> &nodesPlanes, std::vector<Bounds3f> &nodesBounds,
                      int positionOfNextNode, float S, float Sn, Bounds3f parentBB,
                      Bounds3f childBB);
 float carveThreeOrFourSides(const std::vector<int> sidesToCarve,
                             std::vector<int> &nodeComposition,
-                            std::vector<float> &nodesPlanes, int positionOfNextNode,
+                            std::vector<float> &nodesPlanes,
+                            std::vector<Bounds3f> &nodesBounds, int positionOfNextNode,
                             float S, float Sn, Bounds3f parentBB, Bounds3f childBB);
 float carveOneOrTwoSides(std::vector<int> sidesToCarve, std::vector<int> &nodeComposition,
                          std::vector<float> &nodesPlanes, int positionOfNextNode, float S,
@@ -183,7 +185,27 @@ class WDSTAggregate {
     std::vector<Primitive> primitives;
     std::vector<uint32_t> linearWDST;
     Bounds3f globalBB;
+    int maximumDepth;
 };
+
+DSTBuildNode *getNextRelevantNode(DSTBuildNode *node);
+WDSTBuildNode *transformDSTNode(ThreadLocal<Allocator> &threadAllocators,
+                                DSTBuildNode node);
+WDSTBuildNode *determineCNConstelation(ThreadLocal<Allocator> &threadAllocators,
+                                       Bounds3f parentBB,
+                                       DSTBuildNode *nextRelevantDSTNode, float S);
+WDSTBuildNode *getThreeCarvingNodes(ThreadLocal<Allocator> &threadAllocators,
+                                    std::vector<int> sidesToCarve, Bounds3f parentBB,
+                                    DSTBuildNode *nextRelevantDSTNode, float *globalSAH,
+                                    float S);
+WDSTBuildNode *getTwoCarvingNodes(ThreadLocal<Allocator> &threadAllocators,
+                                  std::vector<int> sidesToCarve, Bounds3f parentBB,
+                                  DSTBuildNode *nextRelevantDSTNode, float *globalSAH,
+                                  float S);
+WDSTBuildNode *getOneCarvingNode(ThreadLocal<Allocator> &threadAllocators,
+                                 std::vector<int> sidesToCarve, Bounds3f parentBB,
+                                 DSTBuildNode *nextRelevantDSTNode, float *SAH, float S);
+WDSTBuildNode *getLowerEnd(WDSTBuildNode *node);
 
 Bounds3f carve(Bounds3f parentBB, Bounds3f childBB, std::vector<int> sidesToCarve,
                std::vector<float> &planes);
