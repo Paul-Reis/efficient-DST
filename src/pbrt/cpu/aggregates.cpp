@@ -1391,7 +1391,7 @@ pstd::optional<ShapeIntersection> DSTAggregate::Intersect(const Ray &ray,
 
     const Vector3f invDir = {1.f / ray.d.x, 1.f / ray.d.y, 1.f / ray.d.z};
     const int dirSgn[3] = {invDir[0] < 0, invDir[1] < 0, invDir[2] < 0};
-    if (globalBB.IntersectP(ray.o, ray.d, tMax, invDir, dirSgn))
+    if (!globalBB.IntersectP(ray.o, ray.d, tMax, invDir, dirSgn))
         return {};
     if (tMin < 0)
         tMin = 0;
@@ -1416,7 +1416,7 @@ pstd::optional<ShapeIntersection> DSTAggregate::Intersect(const Ray &ray,
 
             unsigned axis = header5 >> 2;
             unsigned sign = dirSgn[axis];
-            unsigned diff = header5 & 3;
+            unsigned diff = header5 & 3; 
             float ts1 = (splitPlanes[sign] - ray.o[axis]) * invDir[axis];
             float ts2 = (splitPlanes[sign ^ 1] - ray.o[axis]) * invDir[axis];
 
@@ -1540,7 +1540,7 @@ bool DSTAggregate::IntersectP(const Ray &ray, Float globalTMax) {
 
     const Vector3f invDir = {1.f / ray.d.x, 1.f / ray.d.y, 1.f / ray.d.z}; 
     const int dirSgn[3] = {invDir[0] < 0, invDir[1] < 0, invDir[2] < 0};
-    if (globalBB.IntersectP(ray.o, ray.d, tMax, invDir, dirSgn))
+    if (!globalBB.IntersectP(ray.o, ray.d, tMax, invDir, dirSgn))
         return false;
     if (tMin < 0)
         tMin = 0;
@@ -2198,9 +2198,9 @@ WDSTAggregate *WDSTAggregate::Create(std::vector<Primitive> prims,
 Bounds3f WDSTAggregate::Bounds() const {
     return globalBB;
 }
-/*
+
 pstd::optional<ShapeIntersection> WDSTAggregate::Intersect(const Ray &ray,
-                                                           Float globalTMax) const {
+                                                           Float globalTMax) {
     pstd::optional<ShapeIntersection> si;
     float tMin = 0;
     float tMax = globalTMax;
@@ -2231,6 +2231,15 @@ pstd::optional<ShapeIntersection> WDSTAggregate::Intersect(const Ray &ray,
                 goto leaf;
             }
             int amountOfChildren = header5 >> 2;
+            int whereDoubleChildren = header5 & 0b11;
+            int axes[] = {-1, -1, -1};
+            int childrenSize[] = {-1, -1, -1};
+            for (int i = 0; i < amountOfChildren; i++) {
+                axes[i] = (headerOffset >> (24 - 2 * i)) & 0b11;
+                childrenSize[i] = (headerOffset >> (17 - 3 * i)) & 0b111;
+            }
+
+            headerOffset = linearWDST[idx + 1];
             //amountOfChildren is one smaller than the actual amount of children for this SN, but this way it is half of the amount of planes stored in this SN
             std::vector<float> splitPlanes(amountOfChildren * 2);
             for (int i = 0; i < amountOfChildren; i += 2) {
@@ -2239,49 +2248,198 @@ pstd::optional<ShapeIntersection> WDSTAggregate::Intersect(const Ray &ray,
             }
             idx = headerOffset & OFFSET;
 
+            unsigned sign = dirSgn[axes[0]];
+            float ts1 = (splitPlanes[sign] - ray.o[axes[0]]) * invDir[axes[0]];
+            float ts2 = (splitPlanes[sign ^ 1] - ray.o[axes[0]]) * invDir[axes[0]];
 
-             
-            unsigned axis = header5 >> 2;
-            unsigned sign = dirSgn[axis];
-            unsigned side = header5 & 3;
-            float ts1 = (splitPlanes[sign] - ray.o[axis]) * invDir[axis];
-            float ts2 = (splitPlanes[sign ^ 1] - ray.o[axis]) * invDir[axis];
-
-            sign *= diff;
             if (tMax >= ts2) {
                 float tNext = std::max(tMin, ts2);
                 if (tMin <= ts1) {
-                    stack[++stackPtr] = StackItem(idx + (sign ^ diff), tNext, tMax);
-                    idx += sign;
-                    tMax = std::min(tMax, ts1);
+                    std::list<StackItem> intersectedChildren;
+                    float localTMax = std::min(tMax, ts2);
+                    if ((whereDoubleChildren >> (sign ^ 1)) & 0b1) {
+                        unsigned axis = axes[1 + sign];
+                        unsigned internalSign = dirSgn[axis];
+                        int previousChildren = sign * ((whereDoubleChildren >> 1) + 1);
+                        float ts3 = (splitPlanes[2 + internalSign + sign * (amountOfChildren == 4)] - ray.o[axis]) * invDir[axis];
+                        float ts4 = (splitPlanes[2 + (internalSign ^ 1) + sign * (amountOfChildren == 4)] - ray.o[axis]) * invDir[axis];
+                        if (localTMax >= ts4) {
+                            float localTNext = std::max(tMin, ts4);
+                            if (tMin <= ts3) {
+                                int localIdx1 = idx;
+                                int childIndex1 = previousChildren + internalSign;
+                                for (int i = 0; i < childIndex1; i++)
+                                    localIdx1 += childrenSize[i];
+                                intersectedChildren.push_back(StackItem(localIdx1, tMin, std::min(localTMax, ts3)));
+                                int localIdx2 = idx;
+                                int childIndex2 = previousChildren + (internalSign ^ 1);
+                                for (int i = 0; i < childIndex2; i++)
+                                    localIdx2 += childrenSize[i];
+                                intersectedChildren.push_back(StackItem(localIdx2, localTNext, localTMax));
+                            } else {
+                                int localIdx = idx;
+                                int childIndex = previousChildren + (internalSign ^ 1);
+                                for (int i = 0; i < childIndex; i++)
+                                    localIdx += childrenSize[i];
+                                intersectedChildren.push_back(StackItem(localIdx, localTNext, localTMax));
+                            }
+                        } else {
+                            if (tMin <= ts3) {
+                                int localIdx = idx;
+                                int childIndex = previousChildren + internalSign;
+                                for (int i = 0; i < childIndex; i++)
+                                    localIdx += childrenSize[i];
+                                intersectedChildren.push_back(StackItem(localIdx, tMin, std::min(localTMax, ts3)));
+                            }
+                        }
+                    } else {
+                        int localIdx = idx;
+                        int childIndex = sign * ((whereDoubleChildren >> 1) + 1);
+                        for (int i = 0; i < childIndex; i++)
+                            localIdx += childrenSize[i];
+                        intersectedChildren.push_back(StackItem(localIdx, tMin, std::min(tMax, ts1)));
+                    }
+                    float localTMin = std::max(tMin, ts2);
+                    if ((whereDoubleChildren >> sign) & 0b1) {
+                        unsigned axis = axes[1 + (sign ^ 1)];
+                        unsigned internalSign = dirSgn[axis];
+                        int previousChildren = (sign ^ 1) * ((whereDoubleChildren >> 1) + 1);
+                        float ts3 = (splitPlanes[2 + internalSign + (sign ^ 1) * (amountOfChildren == 4)] - ray.o[axis]) * invDir[axis];
+                        float ts4 = (splitPlanes[2 + (internalSign ^ 1) + (sign ^ 1) * (amountOfChildren == 4)] - ray.o[axis]) * invDir[axis];
+                        if (tMax >= ts4) {
+                            float localTNext = std::max(localTMin, ts4);
+                            if (tMin <= ts3) {
+                                int localIdx1 = idx;
+                                int childIndex1 = previousChildren + internalSign;
+                                for (int i = 0; i < childIndex1; i++)
+                                    localIdx1 += childrenSize[i];
+                                intersectedChildren.push_back(StackItem(localIdx1, localTMin, std::min(tMax, ts3)));
+                                int localIdx2 = idx;
+                                int childIndex2 = previousChildren + (internalSign ^ 1);
+                                for (int i = 0; i < childIndex2; i++)
+                                    localIdx2 += childrenSize[i];
+                                intersectedChildren.push_back(StackItem(localIdx2, localTNext, tMax));
+                            } else {
+                                int localIdx = idx;
+                                int childIndex = previousChildren + (internalSign ^ 1);
+                                for (int i = 0; i < childIndex; i++)
+                                    localIdx += childrenSize[i];
+                                intersectedChildren.push_back(StackItem(localIdx, localTNext, tMax));
+                            }
+                        } else {
+                            if (localTMin <= ts3) {
+                                int localIdx = idx;
+                                int childIndex = previousChildren + internalSign;
+                                for (int i = 0; i < childIndex; i++)
+                                    localIdx += childrenSize[i];
+                                intersectedChildren.push_back(StackItem(localIdx, localTMin, std::min(tMax, ts3)));
+                            }
+                        }
+                    } else {
+                        int localIdx = idx;
+                        int childIndex = (sign ^ 1) * ((whereDoubleChildren >> 1) + 1);
+                        for (int i = 0; i < childIndex; i++)
+                            localIdx += childrenSize[i];
+                        intersectedChildren.push_back(StackItem(localIdx, tNext, tMax));
+                    }
+
+                    while (!intersectedChildren.empty()) {
+                            stack[++stackPtr] = intersectedChildren.back();
+                            intersectedChildren.pop_back();
+                    }
+                    goto pop;
                 } else {
-                    idx += sign;
                     tMin = tNext;
+                    if ((whereDoubleChildren >> sign) & 0b1) {
+                        unsigned axis = axes[1 + sign];
+                        unsigned internalSign = dirSgn[axis];
+                        int previousChildren = (sign ^ 1) * ((whereDoubleChildren >> 1) + 1);
+                        float ts3 = (splitPlanes[2 + internalSign + (sign ^ 1) * (amountOfChildren == 4)] - ray.o[axis]) * invDir[axis];
+                        float ts4 = (splitPlanes[2 + (internalSign ^ 1) + (sign ^ 1) * (amountOfChildren == 4)] - ray.o[axis]) * invDir[axis];
+                        if (tMax >= ts4) {
+                            float internalTNext = std::max(tMin, ts4);
+                            if (tMin <= ts3) {
+                                int childIndex1 = previousChildren + internalSign;
+                                for (int i = 0; i < childIndex1; i++)
+                                    idx += childrenSize[i];
+                                int otherIdx = idx;
+                                int childIndex2 = previousChildren + (internalSign ^ 1);
+                                for (int i = 0; i < childIndex2; i++)
+                                    otherIdx += childrenSize[i];
+                                stack[++stackPtr] = StackItem(otherIdx, internalTNext, tMax);
+                                tMax = std::min(tMax, ts3);
+                            } else {
+                                int childIndex = previousChildren + (internalSign ^ 1);
+                                for (int i = 0; i < childIndex; i++)
+                                    idx += childrenSize[i];
+                                tMin = internalTNext;
+                            }
+                            continue;
+                        } else {
+                            if (tMin <= ts3) {
+                                int childIndex = previousChildren + internalSign;
+                                for (int i = 0; i < childIndex; i++)
+                                    idx += childrenSize[i];
+                                tMax = std::min(tMax, ts4);
+                                continue;
+                            } else {
+                                goto pop;
+                            }
+                        }
+                    } else {
+                        int childIndex = (sign ^ 1) * amountOfChildren;
+                        for (int i = 0; i < childIndex; i++)
+                            idx += childrenSize[i];
+                        tMin = tNext;
+                    }
                 }
                 continue;
             } else {
                 if (tMin <= ts1) {
-                    idx += sign;
                     tMax = std::min(tMax, ts1);
-                    continue;
-                } else {
-                    goto pop;
-                }
-            }
-
-            if (tMax >= ts2) {
-                if (tMin <= ts1) {
-                
-                } else {
-                
-                }
-            } else {
-                if (tMin <= ts1) {
-                    if (amountOfChildren == 1 || side == ) {
-                        
+                    if ((whereDoubleChildren >> (sign ^ 1)) & 0b1) {
+                        unsigned axis = axes[1 + (sign ^ 1)];
+                        unsigned internalSign = dirSgn[axis];
+                        int previousChildren = sign * ((whereDoubleChildren >> 1) + 1);
+                        float ts3 = (splitPlanes[2 + internalSign + sign * (amountOfChildren == 4)] - ray.o[axis]) * invDir[axis];
+                        float ts4 = (splitPlanes[2 + (internalSign ^ 1) +  sign * (amountOfChildren == 4)] - ray.o[axis]) * invDir[axis];
+                        if (tMax >= ts4) {
+                            float internalTNext = std::max(tMin, ts4);
+                            if (tMin <= ts3) {
+                                int childIndex1 = previousChildren + internalSign;
+                                for (int i = 0; i < childIndex1; i++)
+                                    idx += childrenSize[i];
+                                int otherIdx = idx;
+                                int childIndex2 = previousChildren + (internalSign ^ 1);
+                                for (int i = 0; i < childIndex2; i++)
+                                    otherIdx += childrenSize[i];
+                                stack[++stackPtr] = StackItem(otherIdx, internalTNext, tMax);
+                                tMax = std::min(tMax, ts3);
+                            } else {
+                                int childIndex = previousChildren + (internalSign ^ 1);
+                                for (int i = 0; i < childIndex; i++)
+                                    idx += childrenSize[i];
+                                tMin = internalTNext;
+                            }
+                            continue;
+                        } else {
+                            if (tMin <= ts3) {
+                                int childIndex = previousChildren + internalSign;
+                                for (int i = 0; i < childIndex; i++)
+                                    idx += childrenSize[i];
+                                tMax = std::min(tMax, ts4);
+                                continue;
+                            } else {
+                                goto pop;
+                            }
+                        }
                     } else {
-                        
+                        int childIndex = sign * amountOfChildren;
+                        for (int i = 0; i < childIndex; i++)
+                            idx += childrenSize[i];
+                        tMax = std::min(tMax, ts1);
                     }
+                    continue;
                 } else {
                     goto pop;
                 }
@@ -2289,7 +2447,7 @@ pstd::optional<ShapeIntersection> WDSTAggregate::Intersect(const Ray &ray,
         } else { //Hier nur CN oder CL
             float carvePlanes[2];
             carvePlanes[0] = *reinterpret_cast<float *>(linearWDST[idx + 1]);
-            carvePlanes[1] = *reinterpret_cast<float *>(&linearWDST[idx + 2]);
+            carvePlanes[1] = *reinterpret_cast<float *>(linearWDST[idx + 2]);
 
             char carveType1 = header5 >> 2 & 3;
             char carveType2 = header5 & 3;
@@ -2350,7 +2508,9 @@ pstd::optional<ShapeIntersection> WDSTAggregate::Intersect(const Ray &ray,
                 si = primSi;
                 tMax = si->tHit;
             }
-            // Test if last Triangle in node
+            //TODO: isLast is not actively set for primitives of WDST yet, but it is set for primitives of DST
+            //      as the leafs and their primitives are identical for WDST and DST isLast dos not have to be determined
+            //      again for WDST, instead I can just use primitives of DST. (maybe I have to set it manualy)
             if (primitives[i].isLast()) {
                 break;
             }
@@ -2371,9 +2531,366 @@ pstd::optional<ShapeIntersection> WDSTAggregate::Intersect(const Ray &ray,
     }
     return si;
 }
-*/
 
-bool WDSTAggregate::IntersectP(const Ray &ray, Float tMax) const {
+bool WDSTAggregate::IntersectP(const Ray &ray, Float globalTMax) {
+    float tMin = 0;
+    float tMax = globalTMax;
+
+    unsigned headerOffset;
+    unsigned header5;
+    bool leaf;
+    unsigned idx = 0;
+
+    const Vector3f invDir = {1.f / ray.d.x, 1.f / ray.d.y, 1.f / ray.d.z};
+    const int dirSgn[3] = {invDir[0] < 0, invDir[1] < 0, invDir[2] < 0};
+    if (globalBB.IntersectP(ray.o, ray.d, tMax, invDir, dirSgn))
+        return {};
+    if (tMin < 0)
+        tMin = 0;
+
+    StackItem *stack = new StackItem[maximumDepth];
+    int stackPtr = -1;
+
+    while (true) {
+        headerOffset = linearWDST[idx];
+        header5 = headerOffset >> 27;
+        leaf = (headerOffset >> 26) & 1;
+
+        if (header5 >> 4 == 0) {
+            if (leaf) {
+                idx = headerOffset & OFFSET;
+                goto leaf;
+            }
+            int amountOfChildren = header5 >> 2;
+            int whereDoubleChildren = header5 & 0b11;
+            int axes[] = {-1, -1, -1};
+            int childrenSize[] = {-1, -1, -1};
+            for (int i = 0; i < amountOfChildren; i++) {
+                axes[i] = (headerOffset >> (24 - 2 * i)) & 0b11;
+                childrenSize[i] = (headerOffset >> (17 - 3 * i)) & 0b111;
+            }
+
+            headerOffset = linearWDST[idx + 1];
+            // amountOfChildren is one smaller than the actual amount of children for this
+            // SN, but this way it is half of the amount of planes stored in this SN
+            std::vector<float> splitPlanes(amountOfChildren * 2);
+            for (int i = 0; i < amountOfChildren; i += 2) {
+                splitPlanes[i] = *reinterpret_cast<float *>(linearWDST[idx + 1 + i]);
+                splitPlanes[i + 1] = *reinterpret_cast<float *>(linearWDST[idx + 2 + i]);
+            }
+            idx = headerOffset & OFFSET;
+
+            unsigned sign = dirSgn[axes[0]];
+            float ts1 = (splitPlanes[sign] - ray.o[axes[0]]) * invDir[axes[0]];
+            float ts2 = (splitPlanes[sign ^ 1] - ray.o[axes[0]]) * invDir[axes[0]];
+
+            if (tMax >= ts2) {
+                float tNext = std::max(tMin, ts2);
+                if (tMin <= ts1) {
+                    std::list<StackItem> intersectedChildren;
+                    float localTMax = std::min(tMax, ts2);
+                    if ((whereDoubleChildren >> (sign ^ 1)) & 0b1) {
+                        unsigned axis = axes[1 + sign];
+                        unsigned internalSign = dirSgn[axis];
+                        int previousChildren = sign * ((whereDoubleChildren >> 1) + 1);
+                        float ts3 = (splitPlanes[2 + internalSign +
+                                                 sign * (amountOfChildren == 4)] -
+                                     ray.o[axis]) *
+                                    invDir[axis];
+                        float ts4 = (splitPlanes[2 + (internalSign ^ 1) +
+                                                 sign * (amountOfChildren == 4)] -
+                                     ray.o[axis]) *
+                                    invDir[axis];
+                        if (localTMax >= ts4) {
+                            float localTNext = std::max(tMin, ts4);
+                            if (tMin <= ts3) {
+                                int localIdx1 = idx;
+                                int childIndex1 = previousChildren + internalSign;
+                                for (int i = 0; i < childIndex1; i++)
+                                    localIdx1 += childrenSize[i];
+                                intersectedChildren.push_back(
+                                    StackItem(localIdx1, tMin, std::min(localTMax, ts3)));
+                                int localIdx2 = idx;
+                                int childIndex2 = previousChildren + (internalSign ^ 1);
+                                for (int i = 0; i < childIndex2; i++)
+                                    localIdx2 += childrenSize[i];
+                                intersectedChildren.push_back(
+                                    StackItem(localIdx2, localTNext, localTMax));
+                            } else {
+                                int localIdx = idx;
+                                int childIndex = previousChildren + (internalSign ^ 1);
+                                for (int i = 0; i < childIndex; i++)
+                                    localIdx += childrenSize[i];
+                                intersectedChildren.push_back(
+                                    StackItem(localIdx, localTNext, localTMax));
+                            }
+                        } else {
+                            if (tMin <= ts3) {
+                                int localIdx = idx;
+                                int childIndex = previousChildren + internalSign;
+                                for (int i = 0; i < childIndex; i++)
+                                    localIdx += childrenSize[i];
+                                intersectedChildren.push_back(
+                                    StackItem(localIdx, tMin, std::min(localTMax, ts3)));
+                            }
+                        }
+                    } else {
+                        int localIdx = idx;
+                        int childIndex = sign * ((whereDoubleChildren >> 1) + 1);
+                        for (int i = 0; i < childIndex; i++)
+                            localIdx += childrenSize[i];
+                        intersectedChildren.push_back(
+                            StackItem(localIdx, tMin, std::min(tMax, ts1)));
+                    }
+                    float localTMin = std::max(tMin, ts2);
+                    if ((whereDoubleChildren >> sign) & 0b1) {
+                        unsigned axis = axes[1 + (sign ^ 1)];
+                        unsigned internalSign = dirSgn[axis];
+                        int previousChildren =
+                            (sign ^ 1) * ((whereDoubleChildren >> 1) + 1);
+                        float ts3 = (splitPlanes[2 + internalSign +
+                                                 (sign ^ 1) * (amountOfChildren == 4)] -
+                                     ray.o[axis]) *
+                                    invDir[axis];
+                        float ts4 = (splitPlanes[2 + (internalSign ^ 1) +
+                                                 (sign ^ 1) * (amountOfChildren == 4)] -
+                                     ray.o[axis]) *
+                                    invDir[axis];
+                        if (tMax >= ts4) {
+                            float localTNext = std::max(localTMin, ts4);
+                            if (tMin <= ts3) {
+                                int localIdx1 = idx;
+                                int childIndex1 = previousChildren + internalSign;
+                                for (int i = 0; i < childIndex1; i++)
+                                    localIdx1 += childrenSize[i];
+                                intersectedChildren.push_back(
+                                    StackItem(localIdx1, localTMin, std::min(tMax, ts3)));
+                                int localIdx2 = idx;
+                                int childIndex2 = previousChildren + (internalSign ^ 1);
+                                for (int i = 0; i < childIndex2; i++)
+                                    localIdx2 += childrenSize[i];
+                                intersectedChildren.push_back(
+                                    StackItem(localIdx2, localTNext, tMax));
+                            } else {
+                                int localIdx = idx;
+                                int childIndex = previousChildren + (internalSign ^ 1);
+                                for (int i = 0; i < childIndex; i++)
+                                    localIdx += childrenSize[i];
+                                intersectedChildren.push_back(
+                                    StackItem(localIdx, localTNext, tMax));
+                            }
+                        } else {
+                            if (localTMin <= ts3) {
+                                int localIdx = idx;
+                                int childIndex = previousChildren + internalSign;
+                                for (int i = 0; i < childIndex; i++)
+                                    localIdx += childrenSize[i];
+                                intersectedChildren.push_back(
+                                    StackItem(localIdx, localTMin, std::min(tMax, ts3)));
+                            }
+                        }
+                    } else {
+                        int localIdx = idx;
+                        int childIndex = (sign ^ 1) * ((whereDoubleChildren >> 1) + 1);
+                        for (int i = 0; i < childIndex; i++)
+                            localIdx += childrenSize[i];
+                        intersectedChildren.push_back(StackItem(localIdx, tNext, tMax));
+                    }
+
+                    while (!intersectedChildren.empty()) {
+                        stack[++stackPtr] = intersectedChildren.back();
+                        intersectedChildren.pop_back();
+                    }
+                    goto pop;
+                } else {
+                    tMin = tNext;
+                    if ((whereDoubleChildren >> sign) & 0b1) {
+                        unsigned axis = axes[1 + sign];
+                        unsigned internalSign = dirSgn[axis];
+                        int previousChildren =
+                            (sign ^ 1) * ((whereDoubleChildren >> 1) + 1);
+                        float ts3 = (splitPlanes[2 + internalSign +
+                                                 (sign ^ 1) * (amountOfChildren == 4)] -
+                                     ray.o[axis]) *
+                                    invDir[axis];
+                        float ts4 = (splitPlanes[2 + (internalSign ^ 1) +
+                                                 (sign ^ 1) * (amountOfChildren == 4)] -
+                                     ray.o[axis]) *
+                                    invDir[axis];
+                        if (tMax >= ts4) {
+                            float internalTNext = std::max(tMin, ts4);
+                            if (tMin <= ts3) {
+                                int childIndex1 = previousChildren + internalSign;
+                                for (int i = 0; i < childIndex1; i++)
+                                    idx += childrenSize[i];
+                                int otherIdx = idx;
+                                int childIndex2 = previousChildren + (internalSign ^ 1);
+                                for (int i = 0; i < childIndex2; i++)
+                                    otherIdx += childrenSize[i];
+                                stack[++stackPtr] =
+                                    StackItem(otherIdx, internalTNext, tMax);
+                                tMax = std::min(tMax, ts3);
+                            } else {
+                                int childIndex = previousChildren + (internalSign ^ 1);
+                                for (int i = 0; i < childIndex; i++)
+                                    idx += childrenSize[i];
+                                tMin = internalTNext;
+                            }
+                            continue;
+                        } else {
+                            if (tMin <= ts3) {
+                                int childIndex = previousChildren + internalSign;
+                                for (int i = 0; i < childIndex; i++)
+                                    idx += childrenSize[i];
+                                tMax = std::min(tMax, ts4);
+                                continue;
+                            } else {
+                                goto pop;
+                            }
+                        }
+                    } else {
+                        int childIndex = (sign ^ 1) * amountOfChildren;
+                        for (int i = 0; i < childIndex; i++)
+                            idx += childrenSize[i];
+                        tMin = tNext;
+                    }
+                }
+                continue;
+            } else {
+                if (tMin <= ts1) {
+                    tMax = std::min(tMax, ts1);
+                    if ((whereDoubleChildren >> (sign ^ 1)) & 0b1) {
+                        unsigned axis = axes[1 + (sign ^ 1)];
+                        unsigned internalSign = dirSgn[axis];
+                        int previousChildren = sign * ((whereDoubleChildren >> 1) + 1);
+                        float ts3 = (splitPlanes[2 + internalSign +
+                                                 sign * (amountOfChildren == 4)] -
+                                     ray.o[axis]) *
+                                    invDir[axis];
+                        float ts4 = (splitPlanes[2 + (internalSign ^ 1) +
+                                                 sign * (amountOfChildren == 4)] -
+                                     ray.o[axis]) *
+                                    invDir[axis];
+                        if (tMax >= ts4) {
+                            float internalTNext = std::max(tMin, ts4);
+                            if (tMin <= ts3) {
+                                int childIndex1 = previousChildren + internalSign;
+                                for (int i = 0; i < childIndex1; i++)
+                                    idx += childrenSize[i];
+                                int otherIdx = idx;
+                                int childIndex2 = previousChildren + (internalSign ^ 1);
+                                for (int i = 0; i < childIndex2; i++)
+                                    otherIdx += childrenSize[i];
+                                stack[++stackPtr] =
+                                    StackItem(otherIdx, internalTNext, tMax);
+                                tMax = std::min(tMax, ts3);
+                            } else {
+                                int childIndex = previousChildren + (internalSign ^ 1);
+                                for (int i = 0; i < childIndex; i++)
+                                    idx += childrenSize[i];
+                                tMin = internalTNext;
+                            }
+                            continue;
+                        } else {
+                            if (tMin <= ts3) {
+                                int childIndex = previousChildren + internalSign;
+                                for (int i = 0; i < childIndex; i++)
+                                    idx += childrenSize[i];
+                                tMax = std::min(tMax, ts4);
+                                continue;
+                            } else {
+                                goto pop;
+                            }
+                        }
+                    } else {
+                        int childIndex = sign * amountOfChildren;
+                        for (int i = 0; i < childIndex; i++)
+                            idx += childrenSize[i];
+                        tMax = std::min(tMax, ts1);
+                    }
+                    continue;
+                } else {
+                    goto pop;
+                }
+            }
+        } else {  // Hier nur CN oder CL
+            float carvePlanes[2];
+            carvePlanes[0] = *reinterpret_cast<float *>(linearWDST[idx + 1]);
+            carvePlanes[1] = *reinterpret_cast<float *>(linearWDST[idx + 2]);
+
+            char carveType1 = header5 >> 2 & 3;
+            char carveType2 = header5 & 3;
+
+            if (carveType1 == 2) {
+                unsigned sign = dirSgn[carveType2];
+                float ts1 = (carvePlanes[sign] - ray.o[carveType2]) * invDir[carveType2];
+                float ts2 =
+                    (carvePlanes[sign ^ 1] - ray.o[carveType2]) * invDir[carveType2];
+                tMax = std::min(ts1, tMax);
+                tMin = std::max(ts2, tMin);
+                if (tMin > tMax)
+                    goto pop;
+                int offset = headerOffset & OFFSET;
+
+                if (leaf) {
+                    idx = offset;
+                    goto leaf;
+                }
+                idx = offset;
+                continue;
+            } else {
+                unsigned axis1 = carveType1 >> 1;
+                unsigned axis2 = (carveType1 & 1) + 1;
+
+                float tMin0, tMin1, tMax0, tMax1;
+                tMin0 = (carvePlanes[0] - ray.o[axis1]) * invDir[axis1];
+                tMax0 = tMax;
+                if (dirSgn[axis1] == (carveType2 >> 1)) {
+                    tMax0 = tMin0;
+                    tMin0 = tMin;
+                }
+                tMin1 = (carvePlanes[1] - ray.o[axis2]) * invDir[axis2];
+                tMax1 = tMax;
+                if (dirSgn[axis2] == (carveType2 & 1)) {
+                    tMax1 = tMin1;
+                    tMin1 = tMin;
+                }
+
+                tMin = std::max(tMin, std::max(tMin0, tMin1));
+                tMax = std::min(tMax, std::min(tMax0, tMax1));
+                if (tMin > tMax)
+                    goto pop;
+                int offset = headerOffset & OFFSET;
+                if (leaf) {
+                    idx = offset;
+                    goto leaf;
+                }
+                idx = offset;
+                continue;
+            }
+        }
+
+    leaf:
+        for (unsigned i = idx;; i++) {
+            if (primitives[i].Intersect(ray, tMax))
+                return true;
+            // Test if last Triangle in node
+            if (primitives[i].isLast()) {
+                break;
+            }
+        }
+    pop:
+        while (true) {
+            if (stackPtr == -1) {
+                return false;
+            }
+            StackItem item = stack[stackPtr--];
+            idx = item.idx;
+            tMin = item.tMin;
+            tMax = std::min(globalTMax, item.tMax);
+            break;
+        }
+    }
     return false;
 }
 
@@ -2466,7 +2983,8 @@ WDSTBuildNode *WDSTAggregate::BuildWDSTRecursively(ThreadLocal<Allocator> &threa
     }
     return node;
 }
-
+
+
 void WDSTAggregate::FlattenWDST(WDSTBuildNode *node) {
     if (node == NULL)
         return;

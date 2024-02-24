@@ -175,8 +175,8 @@ class WDSTAggregate {
                                 const ParameterDictionary &parameters);
 
     Bounds3f Bounds() const;
-    pstd::optional<ShapeIntersection> Intersect(const Ray &ray, Float tMax) const;
-    bool IntersectP(const Ray &ray, Float tMax) const;
+    pstd::optional<ShapeIntersection> Intersect(const Ray &ray, Float tMax);
+    bool IntersectP(const Ray &ray, Float tMax);
 
   private:
     WDSTBuildNode *BuildWDSTRecursively(ThreadLocal<Allocator> &threadAllocators, DSTBuildNode *splittingNode, float S);
