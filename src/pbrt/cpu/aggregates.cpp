@@ -1183,7 +1183,7 @@ Primitive CreateAccelerator(const std::string &name, std::vector<Primitive> prim
     else if (name == "kdtree")
         accel = KdTreeAggregate::Create(std::move(prims), parameters);
     else if (name == "dst")
-        accel = DSTAggregate::Create(std::move(prims), parameters);
+        accel = DSTAggregate::Create(std::move(prims), parameters, 0);
     else if (name == "wdst")
         accel = WDSTAggregate::Create(std::move(prims), parameters);
     else 
@@ -1304,7 +1304,8 @@ struct DSTBuildNode {
         int nTriangles = 0;
 };
 
-DSTAggregate::DSTAggregate(std::vector<Primitive> prims, LinearBVHNode* BVHNodes)
+DSTAggregate::DSTAggregate(std::vector<Primitive> prims, LinearBVHNode *BVHNodes,
+                           DSTBuildNode *rootNode)
     : primitives(std::move(prims)) {
     CHECK(!primitives.empty());
 
@@ -1340,6 +1341,7 @@ DSTAggregate::DSTAggregate(std::vector<Primitive> prims, LinearBVHNode* BVHNodes
 
     linearDST.resize(offset);
     FlattenDST(root);
+    *rootNode = *root;
 }
 
 void DSTAggregate::FlattenDST(DSTBuildNode *node) {
@@ -1366,11 +1368,11 @@ void DSTAggregate::FlattenDST(DSTBuildNode *node) {
 }
 
 DSTAggregate *DSTAggregate::Create(std::vector<Primitive> prims,
-                                   const ParameterDictionary &parameters) {
+                                   const ParameterDictionary &parameters,
+                                   DSTBuildNode *rootNode) {
     //Takes the parameters string and parses it into the necessary parameters for the constructor
-    //TODO: when the necessary parameters for the constructor are clear, add parser
     BVHAggregate bvh = *BVHAggregate::Create(prims, parameters);
-    return new DSTAggregate(std::move(prims), bvh.getNodes());
+    return new DSTAggregate(std::move(prims), bvh.getNodes(), rootNode);
 }
 
 Bounds3f DSTAggregate::Bounds() const {
@@ -2119,27 +2121,13 @@ struct WDSTBuildNode {
         this->depthLevel = depthLevel;
     }
 
-    void InitDoubleAxisCarving(int planeAxesAndCornerType, WDSTBuildNode *child, bool leaf,
-                               int triangleOffset, int depthLevel, float plane1,
-                               float plane2, Bounds3f BB) {
-        header = 0b100000;
-        header |= leaf;
-        header |= planeAxesAndCornerType << 1;
-        if (!leaf)
-            children[0] = child;
-        this->depthLevel = depthLevel;
-        planes[0] = plane1;
-        planes[1] = plane2;
-        this->triangleOffset = triangleOffset;
-        boundingBox = BB;
-    }
-
-    void InitExistingCarving(float plane1, float plane2, WDSTBuildNode *child, int header, int triangleOffset, Bounds3f BB) {
+    void InitExistingCarving(float plane1, float plane2, WDSTBuildNode *child, int header, int triangleOffset, Bounds3f BB, int depthLevel) {
         this->planes[0] = plane1;
         this->planes[1] = plane2;
         this->children[0] = child;
         this->header = header;
         this->triangleOffset = triangleOffset;
+        this->depthLevel = depthLevel;
         boundingBox = BB;
     }
 
@@ -2151,15 +2139,27 @@ struct WDSTBuildNode {
         else
             return children[0]->offset; 
     }
+    int size() const {
+        if (header & 1)
+            return 0;
+        if (header >> 5)
+            return 2;
+        int size = 3;
+        if (children[1] != NULL)
+            size += 2;
+        if (children[3] != NULL)
+            size += 2;
+    }
+    int GetDepthLevel() const { return depthLevel; }
 
     uint32_t triangleOffset;
     std::array<WDSTBuildNode*, 4> children;
     std::array<float, 6> planes;
     Bounds3f boundingBox;
-    int offset; //TODO: offset bestimmen
+    int offset;
     int header;
     int axes; //wird nur für SN gebraucht, kann man eventuell noch eleganter speichern
-    int depthLevel; //TODO: depthLevel bestimmen und maximum depth bestimmen
+    int depthLevel; 
 };
 
 WDSTAggregate::WDSTAggregate(std::vector<Primitive> prims, DSTBuildNode node, Bounds3f globalBB)
@@ -2179,19 +2179,29 @@ WDSTAggregate::WDSTAggregate(std::vector<Primitive> prims, DSTBuildNode node, Bo
     WDSTBuildNode *root;
 
     this->globalBB = globalBB;
-    root = BuildWDSTRecursively(threadAllocators, &node, globalBB.SurfaceArea());
+    root = BuildWDSTRecursively(threadAllocators, &node, globalBB.SurfaceArea(), 0);
 
-    //Vorbereitung für FlattenDST
-    //FlattenWDST();
+    nodesPerDepthLevel.resize(maximumDepth + 1);
+    addNodeToDepthList(root);
+    int offset = 0;
+    for (int i = 0; i < nodesPerDepthLevel.size(); i++) {
+        while (nodesPerDepthLevel[i].size() != 0) {
+            nodesPerDepthLevel[i].front()->offset = offset;
+            offset += nodesPerDepthLevel[i].front()->size() + 1;
+            nodesPerDepthLevel[i].pop_front();
+        }
+    }
+
+    linearWDST.resize(offset);
+    FlattenWDST(root);
 }
 
 
 WDSTAggregate *WDSTAggregate::Create(std::vector<Primitive> prims,
                                      const ParameterDictionary &parameters) {
-    // DSTAggragate dst = *DSTAggragate::Create(prims, parameters); (geht momentan nicht
-    // weilDSTAggregate ein unvollständerger Typ ist?!)
-    DSTBuildNode node;  // TODO: Überlegen, wie ich am elegantesten an die root BuildNode rankomme
-    Bounds3f globalBB;  // TODO: auch hier noch bestimmen
+    DSTBuildNode node;
+    DSTAggregate dst = *DSTAggregate::Create(prims, parameters, &node); // TODO: Überlegen, wie ich am elegantesten an die root BuildNode rankomme
+    Bounds3f globalBB = dst.globalBB;
     return new WDSTAggregate(std::move(prims), node, globalBB);
 }
 
@@ -2895,7 +2905,7 @@ bool WDSTAggregate::IntersectP(const Ray &ray, Float globalTMax) {
 }
 
 WDSTBuildNode *WDSTAggregate::BuildWDSTRecursively(ThreadLocal<Allocator> &threadAllocators,
-                                                 DSTBuildNode *splittingNode, float S) {
+                                                 DSTBuildNode *splittingNode, float S, int currentDepth) {
     Allocator alloc = threadAllocators.Get();
     WDSTBuildNode *node = alloc.new_object<WDSTBuildNode>();
 
@@ -2903,82 +2913,96 @@ WDSTBuildNode *WDSTAggregate::BuildWDSTRecursively(ThreadLocal<Allocator> &threa
     node->planes[1] = splittingNode->Plane2();
     node->axes = splittingNode->GetSplittingPlanesAxis();
     node->boundingBox = splittingNode->GetBB();
+    node->depthLevel = currentDepth;
 
     DSTBuildNode *firstUnderlyingSN = getNextRelevantNode(splittingNode->children[0]);
     DSTBuildNode *secondUnderlyingSN = getNextRelevantNode(splittingNode->children[1]);
 
+    
     if (firstUnderlyingSN->IsSplitting()) {
         node->planes[2] = firstUnderlyingSN->Plane1();
         node->planes[3] = firstUnderlyingSN->Plane2();
-        node->axes += firstUnderlyingSN->GetSplittingPlanesAxis() << 2;
+        node->axes << 2;
+        node->axes += firstUnderlyingSN->GetSplittingPlanesAxis();
 
         DSTBuildNode *nextNode = getNextRelevantNode(firstUnderlyingSN->children[0]); 
         WDSTBuildNode *child1 =
-            determineCNConstelation(threadAllocators, splittingNode->GetBB(), nextNode, S);
+            determineCNConstelation(threadAllocators, splittingNode->GetBB(), nextNode, S, currentDepth + 1);
         WDSTBuildNode *lowerEnd = getLowerEnd(child1);
         if (&child1 == NULL) { //If there is a SN directly after the parent SN in the WDST
-            node->children[0] = BuildWDSTRecursively(threadAllocators, nextNode, firstUnderlyingSN->GetBB().SurfaceArea());
+            node->children[0] = BuildWDSTRecursively(threadAllocators, nextNode, firstUnderlyingSN->GetBB().SurfaceArea(), currentDepth + 1);
         } else if (lowerEnd == NULL) { //If there is no more SN in the subtree of child1 of the parent SN
             node->children[0] = child1;
         } else { //If there are one to three CN between the SN and the parent SN in the WDST
-            lowerEnd->children[0] = BuildWDSTRecursively(threadAllocators, nextNode, lowerEnd->boundingBox.SurfaceArea());
+            lowerEnd->children[0] = BuildWDSTRecursively(threadAllocators, nextNode, lowerEnd->boundingBox.SurfaceArea(), lowerEnd->depthLevel + 1);
             node->children[0] = child1;
         }
 
         nextNode = getNextRelevantNode(firstUnderlyingSN->children[1]);
-        WDSTBuildNode *child2 = determineCNConstelation(threadAllocators, splittingNode->GetBB(), nextNode, S);
+        WDSTBuildNode *child2 = determineCNConstelation(
+            threadAllocators, splittingNode->GetBB(), nextNode, S, currentDepth + 1);
         lowerEnd = getLowerEnd(child2);
         if (&child2 == NULL) {  
             node->children[1] = BuildWDSTRecursively(
-                threadAllocators, nextNode, firstUnderlyingSN->GetBB().SurfaceArea());
+                threadAllocators, nextNode, firstUnderlyingSN->GetBB().SurfaceArea(),
+                currentDepth + 1);
         } else if (lowerEnd == NULL) {
             node->children[1] = child2;
         } else {
             lowerEnd->children[0] = BuildWDSTRecursively(
-                threadAllocators, nextNode, lowerEnd->boundingBox.SurfaceArea());
+                threadAllocators, nextNode, lowerEnd->boundingBox.SurfaceArea(),
+                lowerEnd->depthLevel + 1);
             node->children[1] = child2;
         }
     } else {
-        WDSTBuildNode *child = transformDSTNode(threadAllocators, *splittingNode->children[0]);
+        WDSTBuildNode *child = transformDSTNode(
+            threadAllocators, *splittingNode->children[0], currentDepth + 1);
         node->children[0] = child;
     }
 
     if (secondUnderlyingSN->IsSplitting()) {
         node->planes[4] = secondUnderlyingSN->Plane1();
         node->planes[5] = secondUnderlyingSN->Plane2();
-        node->axes += secondUnderlyingSN->GetSplittingPlanesAxis() << 4;
+        node->axes << 2;
+        node->axes += secondUnderlyingSN->GetSplittingPlanesAxis();
 
         DSTBuildNode *nextNode = getNextRelevantNode(secondUnderlyingSN->children[0]);
-        WDSTBuildNode *child1 =
-            determineCNConstelation(threadAllocators, splittingNode->GetBB(), nextNode, S);
+        WDSTBuildNode *child1 = determineCNConstelation(
+            threadAllocators, splittingNode->GetBB(), nextNode, S, currentDepth + 1);
         WDSTBuildNode *lowerEnd = getLowerEnd(child1);
         if (&child1 ==
             NULL) {
             node->children[2] = BuildWDSTRecursively(
-                threadAllocators, nextNode, firstUnderlyingSN->GetBB().SurfaceArea());
+                threadAllocators, nextNode, firstUnderlyingSN->GetBB().SurfaceArea(),
+                currentDepth + 1);
         } else if (lowerEnd == NULL) {
             node->children[2] = child1;
         } else {
             lowerEnd->children[0] = BuildWDSTRecursively(
-                threadAllocators, nextNode, lowerEnd->boundingBox.SurfaceArea());
+                threadAllocators, nextNode, lowerEnd->boundingBox.SurfaceArea(),
+                lowerEnd->depthLevel + 1);
             node->children[2] = child1;
         }
 
         nextNode = getNextRelevantNode(secondUnderlyingSN->children[1]);
-        WDSTBuildNode *child2 = determineCNConstelation(threadAllocators, splittingNode->GetBB(), nextNode, S);
+        WDSTBuildNode *child2 = determineCNConstelation(
+            threadAllocators, splittingNode->GetBB(), nextNode, S, currentDepth + 1);
         lowerEnd = getLowerEnd(child2);
         if (&child2 == NULL) {
             node->children[3] = BuildWDSTRecursively(
-                threadAllocators, nextNode, firstUnderlyingSN->GetBB().SurfaceArea());
+                threadAllocators, nextNode, firstUnderlyingSN->GetBB().SurfaceArea(),
+                currentDepth + 1);
         } else if (lowerEnd == NULL) {
             node->children[3] = child2;
         } else {
             lowerEnd->children[0] = BuildWDSTRecursively(
-                threadAllocators, nextNode, lowerEnd->boundingBox.SurfaceArea());
+                threadAllocators, nextNode, lowerEnd->boundingBox.SurfaceArea(),
+                lowerEnd->depthLevel + 1);
             node->children[3] = child2;
         }
     } else {
-        WDSTBuildNode *child = transformDSTNode(threadAllocators, *splittingNode->children[1]);
+        WDSTBuildNode *child = transformDSTNode(
+            threadAllocators, *splittingNode->children[1], currentDepth + 1);
         node->children[2] = child;
     }
     return node;
@@ -3001,7 +3025,34 @@ void WDSTAggregate::FlattenWDST(WDSTBuildNode *node) {
             FlattenWDST(node->children[0]);
     }
     else {
-        //TODO: Flatten für breite Splitting Nodes 
+        uint32_t axes = node->axes;
+        while (!(axes && 0b110000))
+            axes << 2;
+        int header = 8;
+        if (node->children[1] != NULL)
+            header += 12;
+        if (node->children[3] != NULL)
+            header += 10;
+        int childrenSize = 0;
+        int j = 0;
+        for (int i = 0; i < 4 && j < 3; i++) {
+            if (node->children[i] != NULL) {
+                childrenSize += node->children[i]->size() << (6 - 3 * j);
+                j++;
+            }
+        }
+        linearWDST[offset] = (header << 26) + (axes << 20) + (childrenSize << 11);
+        linearWDST[offset + 1] = node->children[1]->offset;
+        j = 2;
+        for (int i = 0; i < 6; i += 2) {
+            if (node->planes[i] != NULL) {
+                linearWDST[offset + j] = node->planes[i];
+                linearWDST[offset + j + 1] = node->planes[i + 1];
+                j += 2;
+            }
+        }
+        for (int i = 0; i < 4; i++)
+            FlattenWDST(node->children[i]);
     }
 }
 
@@ -3012,26 +3063,25 @@ DSTBuildNode *getNextRelevantNode(DSTBuildNode *node) {
     return node;
 }
 
-WDSTBuildNode *transformDSTNode(ThreadLocal<Allocator> &threadAllocators, DSTBuildNode node) {
+WDSTBuildNode *transformDSTNode(ThreadLocal<Allocator> &threadAllocators, DSTBuildNode node, int currentDepth) {
     Allocator alloc = threadAllocators.Get();
     WDSTBuildNode returnNode = *alloc.new_object<WDSTBuildNode>();
     WDSTBuildNode *wdstNode = &returnNode;
     while (node.IsCarving()  && !node.isCarvingLeaf()) {
         WDSTBuildNode *nextNode = alloc.new_object<WDSTBuildNode>();
-        wdstNode->InitExistingCarving(node.Plane1(), node.Plane2(), nextNode, node.GetHeader(), 0, node.GetBB());
+        wdstNode->InitExistingCarving(node.Plane1(), node.Plane2(), nextNode, node.GetHeader(), 0, node.GetBB(), currentDepth++);
         node = *node.children[0];
         wdstNode = nextNode;
     }
     if (node.isCarvingLeaf()) {
-        wdstNode->InitExistingCarving(node.Plane1(), node.Plane2(), NULL, node.GetHeader(), node.offsetToFirstChild(), node.GetBB());
+        wdstNode->InitExistingCarving(node.Plane1(), node.Plane2(), NULL, node.GetHeader(), node.offsetToFirstChild(), node.GetBB(), currentDepth++);
     } else {
-        wdstNode->InitLeaf(node.offsetToFirstChild(), 0); //TODO: falls ich später depthLevel für die WDST
-                                                          //Knoten brauche muss hier 0 mit richtigem Wert ersetzt werden
+        wdstNode->InitLeaf(node.offsetToFirstChild(), currentDepth);
     }
     return &returnNode;
 }
 
-WDSTBuildNode *determineCNConstelation(ThreadLocal<Allocator> &threadAllocators, Bounds3f parentBB, DSTBuildNode *nextRelevantDSTNode, float S) {
+WDSTBuildNode *determineCNConstelation(ThreadLocal<Allocator> &threadAllocators, Bounds3f parentBB, DSTBuildNode *nextRelevantDSTNode, float S, int currentDepth) {
     Allocator alloc = threadAllocators.Get();
     WDSTBuildNode *node = alloc.new_object<WDSTBuildNode>();
 
@@ -3059,14 +3109,14 @@ WDSTBuildNode *determineCNConstelation(ThreadLocal<Allocator> &threadAllocators,
             sidesToCarve.push_back(carvedSides[1]);
     }
     if (sidesToCarve.size() == 5)
-        node = getThreeCarvingNodes(threadAllocators, sidesToCarve, parentBB, nextRelevantDSTNode, 0, S);
+        node = getThreeCarvingNodes(threadAllocators, sidesToCarve, parentBB, nextRelevantDSTNode, 0, S, currentDepth);
     else if (sidesToCarve.size() > 2)
-        node = getTwoCarvingNodes(threadAllocators, sidesToCarve, parentBB, nextRelevantDSTNode, 0, S);
+        node = getTwoCarvingNodes(threadAllocators, sidesToCarve, parentBB, nextRelevantDSTNode, 0, S, currentDepth);
     else if (sidesToCarve.size() > 0)
-        node = getOneCarvingNode(threadAllocators, sidesToCarve, parentBB, nextRelevantDSTNode, 0, S);
+        node = getOneCarvingNode(threadAllocators, sidesToCarve, parentBB, nextRelevantDSTNode, 0, S, currentDepth);
     else {
         if (nextRelevantDSTNode->IsLeaf())
-            return transformDSTNode(threadAllocators, *nextRelevantDSTNode);
+            return transformDSTNode(threadAllocators, *nextRelevantDSTNode, currentDepth);
         else
             return NULL;
     }
@@ -3076,7 +3126,7 @@ WDSTBuildNode *determineCNConstelation(ThreadLocal<Allocator> &threadAllocators,
 WDSTBuildNode *getThreeCarvingNodes(ThreadLocal<Allocator> &threadAllocators,
                                     std::vector<int> sidesToCarve, Bounds3f parentBB,
                                     DSTBuildNode *nextRelevantDSTNode, float *globalSAH,
-                                    float S) {
+                                    float S, int currentDepth) {
     Allocator alloc = threadAllocators.Get();
     WDSTBuildNode *bestNode = alloc.new_object<WDSTBuildNode>();
     Float bestSAH = FLT_MAX;
@@ -3106,8 +3156,8 @@ WDSTBuildNode *getThreeCarvingNodes(ThreadLocal<Allocator> &threadAllocators,
             }
 
             node->InitExistingCarving(planes[0], planes[1], getTwoCarvingNodes(threadAllocators, sidesToCarveCopy, carvedParentBB,
-                                   nextRelevantDSTNode, &SAH, S),
-                header, 0, parentBB);
+                                   nextRelevantDSTNode, &SAH, S, currentDepth + 1),
+                header, 0, parentBB, currentDepth);
             
             if(SAH < bestSAH) {
                 bestSAH = SAH;
@@ -3121,7 +3171,7 @@ WDSTBuildNode *getThreeCarvingNodes(ThreadLocal<Allocator> &threadAllocators,
 
 WDSTBuildNode *getTwoCarvingNodes(ThreadLocal<Allocator> & threadAllocators,
                                      std::vector<int> sidesToCarve, Bounds3f parentBB,
-                                    DSTBuildNode *nextRelevantDSTNode, float *globalSAH, float S) {
+                                    DSTBuildNode *nextRelevantDSTNode, float *globalSAH, float S, int currentDepth) {
     Allocator alloc = threadAllocators.Get();
     WDSTBuildNode *bestNode = alloc.new_object<WDSTBuildNode>();
     Float bestSAH = FLT_MAX;
@@ -3151,7 +3201,7 @@ WDSTBuildNode *getTwoCarvingNodes(ThreadLocal<Allocator> & threadAllocators,
             }
 
             node->InitExistingCarving(planes[0], planes[1],
-                getOneCarvingNode(threadAllocators, sidesToCarveCopy, carvedParentBB, nextRelevantDSTNode, &SAH, S), header, 0, parentBB);
+                getOneCarvingNode(threadAllocators, sidesToCarveCopy, carvedParentBB, nextRelevantDSTNode, &SAH, S, currentDepth + 1), header, 0, parentBB, currentDepth);
 
             if (SAH < bestSAH) {
                 bestSAH = SAH;
@@ -3165,7 +3215,7 @@ WDSTBuildNode *getTwoCarvingNodes(ThreadLocal<Allocator> & threadAllocators,
 
 WDSTBuildNode *getOneCarvingNode(ThreadLocal<Allocator> & threadAllocators,
                                  std::vector<int> sidesToCarve, Bounds3f parentBB,
-                                 DSTBuildNode *nextRelevantDSTNode, float *SAH, float S) {
+                                 DSTBuildNode *nextRelevantDSTNode, float *SAH, float S, int currentDepth) {
     Allocator alloc = threadAllocators.Get();
     WDSTBuildNode *node = alloc.new_object<WDSTBuildNode>();
     std::vector<float> planes;
@@ -3187,10 +3237,10 @@ WDSTBuildNode *getOneCarvingNode(ThreadLocal<Allocator> & threadAllocators,
     }
     
     if (nextRelevantDSTNode->IsLeaf() || nextRelevantDSTNode->isCarvingLeaf()) {
-        node->InitExistingCarving(planes[0], planes[1], NULL, header, nextRelevantDSTNode->offsetToFirstChild(), parentBB);
+        node->InitExistingCarving(planes[0], planes[1], NULL, header, nextRelevantDSTNode->offsetToFirstChild(), parentBB, currentDepth);
         *SAH += (carvedParentBB.SurfaceArea() / S) * nextRelevantDSTNode->NTriangles();
     } else {
-        node->InitExistingCarving(planes[0], planes[1], NULL, header, 0, parentBB);
+        node->InitExistingCarving(planes[0], planes[1], NULL, header, 0, parentBB, currentDepth);
     }
     return node;
 }
@@ -3203,6 +3253,14 @@ WDSTBuildNode* getLowerEnd(WDSTBuildNode *node) {
         return NULL;
     }
     return node;
+}
+
+void WDSTAggregate::addNodeToDepthList(WDSTBuildNode *node) {
+    nodesPerDepthLevel[node->GetDepthLevel()].push_back(node);
+    for (WDSTBuildNode *child : node->children) {
+        if (child != NULL)
+            addNodeToDepthList(child);
+    }
 }
 
 

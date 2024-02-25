@@ -111,16 +111,18 @@ struct DSTBuildNode;
 class DSTAggregate {
   public:
     // DSTAggregate Public Methods
-    DSTAggregate(std::vector<Primitive> p, LinearBVHNode* nodes);
+    DSTAggregate(std::vector<Primitive> p, LinearBVHNode *nodes, DSTBuildNode *rootNode);
 
     static DSTAggregate *Create(std::vector<Primitive> prims,
-                                   const ParameterDictionary &parameters);
+                                   const ParameterDictionary &parameters, DSTBuildNode *rootNode);
 
     Bounds3f Bounds() const;
     pstd::optional<ShapeIntersection> Intersect(const Ray &ray, Float tMax) const;
     pstd::optional<ShapeIntersection> Intersect(const Ray &ray, Float tMax);
     bool IntersectP(const Ray &ray, Float tMax) const;
     bool IntersectP(const Ray &ray, Float tMax);
+
+    Bounds3f globalBB;
 
   private:
     // DSTAggregate Private Methodes
@@ -133,7 +135,6 @@ class DSTAggregate {
     // DSTAggregate Private Members
     std::vector<Primitive> primitives;
     std::vector<uint32_t> linearDST;
-    Bounds3f globalBB;
 
     std::vector<std::list<DSTBuildNode*>> nodesPerDepthLevel;
     int maximumDepth;
@@ -179,32 +180,36 @@ class WDSTAggregate {
     bool IntersectP(const Ray &ray, Float tMax);
 
   private:
-    WDSTBuildNode *BuildWDSTRecursively(ThreadLocal<Allocator> &threadAllocators, DSTBuildNode *splittingNode, float S);
+    WDSTBuildNode *BuildWDSTRecursively(ThreadLocal<Allocator> &threadAllocators, DSTBuildNode *splittingNode, float S, int currentDepth);
     void FlattenWDST(WDSTBuildNode *node);
+    void addNodeToDepthList(WDSTBuildNode *node);
 
     std::vector<Primitive> primitives;
     std::vector<uint32_t> linearWDST;
     Bounds3f globalBB;
+
+    std::vector<std::list<WDSTBuildNode *>> nodesPerDepthLevel;
     int maximumDepth;
 };
 
 DSTBuildNode *getNextRelevantNode(DSTBuildNode *node);
 WDSTBuildNode *transformDSTNode(ThreadLocal<Allocator> &threadAllocators,
-                                DSTBuildNode node);
+                                DSTBuildNode node, int currentDepth);
 WDSTBuildNode *determineCNConstelation(ThreadLocal<Allocator> &threadAllocators,
                                        Bounds3f parentBB,
-                                       DSTBuildNode *nextRelevantDSTNode, float S);
+                                       DSTBuildNode *nextRelevantDSTNode, float S, int currentDepth);
 WDSTBuildNode *getThreeCarvingNodes(ThreadLocal<Allocator> &threadAllocators,
                                     std::vector<int> sidesToCarve, Bounds3f parentBB,
                                     DSTBuildNode *nextRelevantDSTNode, float *globalSAH,
-                                    float S);
+                                    float S, int currentDepth);
 WDSTBuildNode *getTwoCarvingNodes(ThreadLocal<Allocator> &threadAllocators,
                                   std::vector<int> sidesToCarve, Bounds3f parentBB,
                                   DSTBuildNode *nextRelevantDSTNode, float *globalSAH,
-                                  float S);
+                                  float S, int currentDepth);
 WDSTBuildNode *getOneCarvingNode(ThreadLocal<Allocator> &threadAllocators,
                                  std::vector<int> sidesToCarve, Bounds3f parentBB,
-                                 DSTBuildNode *nextRelevantDSTNode, float *SAH, float S);
+                                 DSTBuildNode *nextRelevantDSTNode, float *SAH, float S,
+                                 int currentDepth);
 WDSTBuildNode *getLowerEnd(WDSTBuildNode *node);
 
 Bounds3f carve(Bounds3f parentBB, Bounds3f childBB, std::vector<int> sidesToCarve,
