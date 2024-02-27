@@ -43,6 +43,12 @@ class BVHAggregate {
 
     LinearBVHNode* getNodes();
 
+     // Stats for evaluation
+    float overallSAHCost;
+    int numberOfNodes;
+    std::list<int> triangleIntersectionsPerRay;
+    std::list<int> planeIntersectionsPerRay;
+
   private:
     // BVHAggregate Private Methods
     BVHBuildNode *buildRecursive(ThreadLocal<Allocator> &threadAllocators,
@@ -131,6 +137,8 @@ class DSTAggregate {
                                    int currentNodeIndex, int currentDepth);
     void FlattenDST(DSTBuildNode *node);
     void addNodeToDepthList(DSTBuildNode *node);
+    void DSTAggregate::initStatValues();
+    void printDSTStats();
 
     // DSTAggregate Private Members
     std::vector<Primitive> primitives;
@@ -138,6 +146,20 @@ class DSTAggregate {
 
     std::vector<std::list<DSTBuildNode*>> nodesPerDepthLevel;
     int maximumDepth;
+
+    // Stats for evaluation
+    float overallSAHCost;
+    int numberOfNodes;
+    std::list<int> triangleIntersectionsPerRay; //intersect
+    std::list<int> planeIntersectionsPerRay;    //intersect
+    int numberOfSplittingNodes;
+    int numberOfCarvingNodes;
+    int numberOfLeafs;
+    int numberOfCarvingNodeSets;
+    int setsWithZero;
+    int setsWithOne;
+    int setsWithTwo;
+    int setsWithThree;  
 };
 
 class StackItem {
@@ -183,6 +205,12 @@ class WDSTAggregate {
     WDSTBuildNode *BuildWDSTRecursively(ThreadLocal<Allocator> &threadAllocators, DSTBuildNode *splittingNode, float S, int currentDepth);
     void FlattenWDST(WDSTBuildNode *node);
     void addNodeToDepthList(WDSTBuildNode *node);
+    WDSTBuildNode *determineCNConstelation(ThreadLocal<Allocator> &threadAllocators,
+                                           Bounds3f parentBB,
+                                           DSTBuildNode *nextRelevantDSTNode, float S,
+                                           int currentDepth, float *SAH);
+    void WDSTAggregate::initStatValues();
+    void printWDSTStats();
 
     std::vector<Primitive> primitives;
     std::vector<uint32_t> linearWDST;
@@ -190,14 +218,29 @@ class WDSTAggregate {
 
     std::vector<std::list<WDSTBuildNode *>> nodesPerDepthLevel;
     int maximumDepth;
+
+    //Stats for evaluation
+    float overallSAHCost;
+    int numberOfNodes;
+    std::list<int> triangleIntersectionsPerRay;  //
+    std::list<int> planeIntersectionsPerRay;     //
+    int numberOfSplittingNodes;
+    int numberOfCarvingNodes;
+    int numberOfLeafs;
+    int numberOfCarvingNodeSets;
+    int setsWithZero;
+    int setsWithOne;
+    int setsWithTwo;
+    int setsWithThree;
+    int smallSplittingNodes;
+    int mediumSplittingNodes;
+    int bigSplittingNodes;
 };
 
 DSTBuildNode *getNextRelevantNode(DSTBuildNode *node);
 WDSTBuildNode *transformDSTNode(ThreadLocal<Allocator> &threadAllocators,
                                 DSTBuildNode node, int currentDepth);
-WDSTBuildNode *determineCNConstelation(ThreadLocal<Allocator> &threadAllocators,
-                                       Bounds3f parentBB,
-                                       DSTBuildNode *nextRelevantDSTNode, float S, int currentDepth);
+
 WDSTBuildNode *getThreeCarvingNodes(ThreadLocal<Allocator> &threadAllocators,
                                     std::vector<int> sidesToCarve, Bounds3f parentBB,
                                     DSTBuildNode *nextRelevantDSTNode, float *globalSAH,

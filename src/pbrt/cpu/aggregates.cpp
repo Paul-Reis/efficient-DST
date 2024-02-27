@@ -27,6 +27,7 @@ STAT_RATIO("BVH/Primitives per leaf node", totalPrimitives, totalLeafNodes);
 STAT_COUNTER("BVH/Interior nodes", interiorNodes);
 STAT_COUNTER("BVH/Leaf nodes", leafNodes);
 STAT_PIXEL_COUNTER("BVH/Nodes visited", bvhNodesVisited);
+STAT_PIXEL_COUNTER("BVH/Plane Intersections", bvhPlaneIntersections)
 
 uint32_t IS_LEAF = 0b00000100000000000000000000000000;
 uint32_t IS_CARVING = 0b10000000000000000000000000000000;
@@ -1182,9 +1183,9 @@ Primitive CreateAccelerator(const std::string &name, std::vector<Primitive> prim
         accel = BVHAggregate::Create(std::move(prims), parameters);
     else if (name == "kdtree")
         accel = KdTreeAggregate::Create(std::move(prims), parameters);
-    else if (name == "dst")
+    else if (name == "dst") {
         accel = DSTAggregate::Create(std::move(prims), parameters, 0);
-    else if (name == "wdst")
+    } else if (name == "wdst")
         accel = WDSTAggregate::Create(std::move(prims), parameters);
     else 
         ErrorExit("%s: accelerator type unknown.", name);
@@ -1308,6 +1309,7 @@ DSTAggregate::DSTAggregate(std::vector<Primitive> prims, LinearBVHNode *BVHNodes
                            DSTBuildNode *rootNode)
     : primitives(std::move(prims)) {
     CHECK(!primitives.empty());
+        this->initStatValues();
 
     pstd::pmr::monotonic_buffer_resource resource;
     Allocator alloc(&resource);
@@ -1335,6 +1337,7 @@ DSTAggregate::DSTAggregate(std::vector<Primitive> prims, LinearBVHNode *BVHNodes
             } else {
                 offset = offset + 3;
             }
+            numberOfNodes++;
             nodesPerDepthLevel[i].pop_front();
         }
     }
@@ -1350,12 +1353,16 @@ void DSTAggregate::FlattenDST(DSTBuildNode *node) {
     uint32_t offset = node->Offset();
     if (node->IsLeaf()) {
         linearDST[offset] = node->GetFlag();
+        numberOfLeafs++;
     } else {
         uint32_t flag = node->GetFlag();
         flag |= node->offsetToFirstChild();
         if (node->IsSplitting()) {
             int leftChildSize = (!node->children[0]->IsLeaf()) * 2 + 1;
             flag |= leftChildSize << 27;
+            numberOfSplittingNodes++;
+        } else {
+            numberOfCarvingNodes++;
         }
         linearDST[offset] = flag;
         linearDST[offset + 1] = node->Plane1();
@@ -1381,7 +1388,6 @@ Bounds3f DSTAggregate::Bounds() const {
 
 pstd::optional<ShapeIntersection> DSTAggregate::Intersect(const Ray &ray,
                                                           Float globalTMax) const {
-    std::cout << "I";
     pstd::optional<ShapeIntersection> si;
     // For code documentation look at DST supplemental materials Listing 7. DST Traversal Kernel
     float tMin = 0;
@@ -1536,7 +1542,6 @@ pstd::optional<ShapeIntersection> DSTAggregate::Intersect(const Ray &ray,
 }
 
 bool DSTAggregate::IntersectP(const Ray &ray, Float globalTMax) const {
-    std::cout << "P";
     //For code documentation look at DST supplemental materials Listing 7. DST Traversal Kernel
     float tMin = 0;
     float tMax = globalTMax;
@@ -1775,6 +1780,7 @@ DSTBuildNode *DSTAggregate::BuildRecursiveFromBVH(ThreadLocal<Allocator> &thread
             bestSAH = sumSAH;
         }
     }
+    overallSAHCost += bestSAH;
 
     bool lastLeftChildIsLeaf = leftChildNodeBVH.nPrimitives;
     bool lastRightChildIsLeaf = rightChildNodeBVH.nPrimitives;
@@ -1783,7 +1789,9 @@ DSTBuildNode *DSTAggregate::BuildRecursiveFromBVH(ThreadLocal<Allocator> &thread
     DSTBuildNode *nextNodeP1 = alloc.new_object<DSTBuildNode>();
     DSTBuildNode *leftChildNode = alloc.new_object<DSTBuildNode>();
     int depthLevel = currentDepth;
+    int setSize = 0;
     while (bestNodeComposition[nextCarvingNode] && nextCarvingNode < 6) {
+        setSize++;
         DSTBuildNode *nextNode = alloc.new_object<DSTBuildNode>();
         depthLevel++;
         if (bestNodeComposition[nextCarvingNode] == 1) {
@@ -1829,12 +1837,23 @@ DSTBuildNode *DSTAggregate::BuildRecursiveFromBVH(ThreadLocal<Allocator> &thread
         leftChildNode = BuildRecursiveFromBVH(threadAllocators, nodes, currentNodeIndex + 1, depthLevel + 1);
     else  if (!lastLeftChildIsLeaf)
         *nextNodeP1 = *BuildRecursiveFromBVH(threadAllocators, nodes, currentNodeIndex + 1, depthLevel +1);
+    if (setSize == 0) {
+        setsWithZero++;
+    } else if (setSize == 1) {
+        setsWithOne++;
+    } else if(setSize == 2) {
+        setsWithTwo++;
+    } else {
+        setsWithThree++;
+    }
 
     nextCarvingNode = 6;
     DSTBuildNode *nextNodeP2 = alloc.new_object<DSTBuildNode>();
     DSTBuildNode *rightChildNode = alloc.new_object<DSTBuildNode>();
     depthLevel = currentDepth;
+    setSize = 0;
     while (bestNodeComposition[nextCarvingNode] && nextCarvingNode < 12) {
+        setSize++;
         DSTBuildNode *nextNode = alloc.new_object<DSTBuildNode>();
         depthLevel++;
         if (bestNodeComposition[nextCarvingNode] == 1) {
@@ -1882,7 +1901,16 @@ DSTBuildNode *DSTAggregate::BuildRecursiveFromBVH(ThreadLocal<Allocator> &thread
             threadAllocators, nodes, parentNodeBVH.secondChildOffset, depthLevel + 1);
     else if (!lastRightChildIsLeaf)
         *nextNodeP2 = *BuildRecursiveFromBVH(threadAllocators, nodes, parentNodeBVH.secondChildOffset, depthLevel + 1);
-    
+    if (setSize == 0) {
+        setsWithZero++;
+    } else if (setSize == 1) {
+        setsWithOne++;
+    } else if (setSize == 2) {
+        setsWithTwo++;
+    } else {
+        setsWithThree++;
+    }
+    numberOfCarvingNodeSets += 2;
     node->InitSplittingNode(bestNodeComposition[12], leftChildNode, rightChildNode,
                             currentDepth, bestNodesPlanes[12], bestNodesPlanes[13], parentNodeBVH.bounds);
 
@@ -2111,6 +2139,46 @@ void DSTAggregate::addNodeToDepthList(DSTBuildNode* node) {
     }
 }
 
+void DSTAggregate::initStatValues() {
+    overallSAHCost = 0;
+    numberOfNodes = 0;
+    numberOfSplittingNodes = 0;
+    numberOfCarvingNodes = 0;
+    numberOfLeafs = 0;
+    numberOfCarvingNodeSets = 0;
+    setsWithZero = 0;
+    setsWithOne = 0;
+    setsWithTwo = 0;
+    setsWithThree = 0;
+}
+
+void DSTAggregate::printDSTStats() {
+    std::cout << '\n' << '\n' << '\n';
+    std::cout << "SAH cost:                                 " << overallSAHCost << '\n';
+    std::cout << "Number of Nodes:                          " << numberOfNodes << '\n';
+    int storageInByte =4 * (numberOfLeafs + numberOfCarvingNodes * 3 + numberOfSplittingNodes * 3);
+    std::cout << "Storage in Byte:                          " << storageInByte << '\n';
+    float sumPlaneIntersections = 0;
+    float sumTriangleIntersections = 0;
+    int rays = planeIntersectionsPerRay.size();
+    for (int i = 0; i < rays; i++) {
+        sumPlaneIntersections += planeIntersectionsPerRay.front();
+        planeIntersectionsPerRay.pop_front();
+        sumTriangleIntersections += triangleIntersectionsPerRay.front();
+        triangleIntersectionsPerRay.pop_front();
+    }
+    std::cout << "Average Triangle Intersections per Ray:   " << sumTriangleIntersections / rays << '\n';
+    std::cout << "Average Plane Intersections per Ray:      " << sumPlaneIntersections / rays << '\n' << '\n';
+    std::cout << "Number of Splitting Nodes:                " << numberOfSplittingNodes << '\n';
+    std::cout << "Number of Carving Nodes:                  " << numberOfCarvingNodes << '\n';
+    std::cout << "Number of Leafs:                          " << numberOfLeafs << '\n' << '\n';
+    std::cout << "Number of Carving Node Sets:              " << numberOfCarvingNodeSets << '\n';
+    std::cout << "Number of Sets size 0:                    " << setsWithZero << '\n';
+    std::cout << "Number of Sets size 1:                    " << setsWithOne << '\n';
+    std::cout << "Number of Sets size 2:                    " << setsWithTwo << '\n';
+    std::cout << "Number of Sets size 3:                    " << setsWithThree << '\n' << '\n' << '\n';
+}
+
 StackItem::StackItem(int idx, float tMin, float tMax) {
     this->idx = idx;
     this->tMax = tMax;
@@ -2176,6 +2244,7 @@ struct WDSTBuildNode {
 WDSTAggregate::WDSTAggregate(std::vector<Primitive> prims, DSTBuildNode node, Bounds3f globalBB)
     : primitives(std::move(prims)) {
     CHECK(!primitives.empty());
+    this->initStatValues();
 
     pstd::pmr::monotonic_buffer_resource resource;
     Allocator alloc(&resource);
@@ -2200,6 +2269,7 @@ WDSTAggregate::WDSTAggregate(std::vector<Primitive> prims, DSTBuildNode node, Bo
             nodesPerDepthLevel[i].front()->offset = offset;
             offset += nodesPerDepthLevel[i].front()->size() + 1;
             nodesPerDepthLevel[i].pop_front();
+            numberOfNodes++;
         }
     }
 
@@ -2937,8 +3007,10 @@ WDSTBuildNode *WDSTAggregate::BuildWDSTRecursively(ThreadLocal<Allocator> &threa
         node->axes += firstUnderlyingSN->GetSplittingPlanesAxis();
 
         DSTBuildNode *nextNode = getNextRelevantNode(firstUnderlyingSN->children[0]); 
+        float SAH;
         WDSTBuildNode *child1 =
-            determineCNConstelation(threadAllocators, splittingNode->GetBB(), nextNode, S, currentDepth + 1);
+            determineCNConstelation(threadAllocators, splittingNode->GetBB(), nextNode, S, currentDepth + 1, &SAH);
+        overallSAHCost += SAH;
         WDSTBuildNode *lowerEnd = getLowerEnd(child1);
         if (&child1 == NULL) { //If there is a SN directly after the parent SN in the WDST
             node->children[0] = BuildWDSTRecursively(threadAllocators, nextNode, firstUnderlyingSN->GetBB().SurfaceArea(), currentDepth + 1);
@@ -2951,7 +3023,8 @@ WDSTBuildNode *WDSTAggregate::BuildWDSTRecursively(ThreadLocal<Allocator> &threa
 
         nextNode = getNextRelevantNode(firstUnderlyingSN->children[1]);
         WDSTBuildNode *child2 = determineCNConstelation(
-            threadAllocators, splittingNode->GetBB(), nextNode, S, currentDepth + 1);
+            threadAllocators, splittingNode->GetBB(), nextNode, S, currentDepth + 1, &SAH);
+        overallSAHCost += SAH;
         lowerEnd = getLowerEnd(child2);
         if (&child2 == NULL) {  
             node->children[1] = BuildWDSTRecursively(
@@ -2978,8 +3051,10 @@ WDSTBuildNode *WDSTAggregate::BuildWDSTRecursively(ThreadLocal<Allocator> &threa
         node->axes += secondUnderlyingSN->GetSplittingPlanesAxis();
 
         DSTBuildNode *nextNode = getNextRelevantNode(secondUnderlyingSN->children[0]);
+        float SAH;
         WDSTBuildNode *child1 = determineCNConstelation(
-            threadAllocators, splittingNode->GetBB(), nextNode, S, currentDepth + 1);
+            threadAllocators, splittingNode->GetBB(), nextNode, S, currentDepth + 1, &SAH);
+        overallSAHCost += SAH;
         WDSTBuildNode *lowerEnd = getLowerEnd(child1);
         if (&child1 ==
             NULL) {
@@ -2997,7 +3072,8 @@ WDSTBuildNode *WDSTAggregate::BuildWDSTRecursively(ThreadLocal<Allocator> &threa
 
         nextNode = getNextRelevantNode(secondUnderlyingSN->children[1]);
         WDSTBuildNode *child2 = determineCNConstelation(
-            threadAllocators, splittingNode->GetBB(), nextNode, S, currentDepth + 1);
+            threadAllocators, splittingNode->GetBB(), nextNode, S, currentDepth + 1, &SAH);
+        overallSAHCost += SAH;
         lowerEnd = getLowerEnd(child2);
         if (&child2 == NULL) {
             node->children[3] = BuildWDSTRecursively(
@@ -3026,6 +3102,7 @@ void WDSTAggregate::FlattenWDST(WDSTBuildNode *node) {
     uint32_t offset = node->offset;
     if (node->IsLeaf()) {
         linearWDST[offset] = node->header << 26 | node->triangleOffset;
+        numberOfLeafs++;
     } else if (node->IsCarving()){
         uint32_t flag = node->header << 26;
         flag |= node->offsetToFirstChild();
@@ -3034,6 +3111,7 @@ void WDSTAggregate::FlattenWDST(WDSTBuildNode *node) {
         linearWDST[offset + 2] = node->planes[1];
         if (node->children[0] != NULL)
             FlattenWDST(node->children[0]);
+        numberOfCarvingNodes++;
     }
     else {
         uint32_t axes = node->axes;
@@ -3064,6 +3142,15 @@ void WDSTAggregate::FlattenWDST(WDSTBuildNode *node) {
         }
         for (int i = 0; i < 4; i++)
             FlattenWDST(node->children[i]);
+        if (header >> 3 == 1) {
+            smallSplittingNodes++;
+        } else if (header >> 3 == 2) {
+            mediumSplittingNodes++;
+        }
+        else {
+            bigSplittingNodes++;
+        }
+        numberOfSplittingNodes++;
     }
 }
 
@@ -3092,9 +3179,12 @@ WDSTBuildNode *transformDSTNode(ThreadLocal<Allocator> &threadAllocators, DSTBui
     return returnNode;
 }
 
-WDSTBuildNode *determineCNConstelation(ThreadLocal<Allocator> &threadAllocators, Bounds3f parentBB, DSTBuildNode *nextRelevantDSTNode, float S, int currentDepth) {
+WDSTBuildNode *WDSTAggregate::determineCNConstelation(
+    ThreadLocal<Allocator> &threadAllocators, Bounds3f parentBB,
+    DSTBuildNode *nextRelevantDSTNode, float S, int currentDepth, float *SAH) {
     Allocator alloc = threadAllocators.Get();
     WDSTBuildNode *node = alloc.new_object<WDSTBuildNode>();
+    this->numberOfCarvingNodeSets++;
 
     Bounds3f childBB = nextRelevantDSTNode->GetBB();
     std::vector<int> sidesToCarve;
@@ -3119,18 +3209,28 @@ WDSTBuildNode *determineCNConstelation(ThreadLocal<Allocator> &threadAllocators,
               sidesToCarve.end()))
             sidesToCarve.push_back(carvedSides[1]);
     }
-    if (sidesToCarve.size() == 5)
-        node = getThreeCarvingNodes(threadAllocators, sidesToCarve, parentBB, nextRelevantDSTNode, 0, S, currentDepth);
-    else if (sidesToCarve.size() > 2)
-        node = getTwoCarvingNodes(threadAllocators, sidesToCarve, parentBB, nextRelevantDSTNode, 0, S, currentDepth);
-    else if (sidesToCarve.size() > 0)
-        node = getOneCarvingNode(threadAllocators, sidesToCarve, parentBB, nextRelevantDSTNode, 0, S, currentDepth);
-    else {
+    float localSAH;
+    if (sidesToCarve.size() == 5) {
+        node = getThreeCarvingNodes(threadAllocators, sidesToCarve, parentBB,
+                                    nextRelevantDSTNode, &localSAH, S, currentDepth);
+        setsWithThree++;
+    } else if (sidesToCarve.size() > 2) {
+        node = getTwoCarvingNodes(threadAllocators, sidesToCarve, parentBB,
+                                  nextRelevantDSTNode, &localSAH, S, currentDepth);
+        setsWithTwo++;
+    } else if (sidesToCarve.size() > 0) {
+        node = getOneCarvingNode(threadAllocators, sidesToCarve, parentBB,
+                                 nextRelevantDSTNode, &localSAH, S, currentDepth);
+        setsWithOne++;
+    }else {
         if (nextRelevantDSTNode->IsLeaf())
             return transformDSTNode(threadAllocators, *nextRelevantDSTNode, currentDepth);
-        else
+        else {
             return NULL;
+        }
+        setsWithZero++;
     }
+    *SAH = localSAH;
     return node;
 }
 
@@ -3274,6 +3374,53 @@ void WDSTAggregate::addNodeToDepthList(WDSTBuildNode *node) {
     }
 }
 
+void WDSTAggregate::initStatValues() {
+    overallSAHCost = 0;
+    numberOfNodes = 0;
+    numberOfSplittingNodes = 0;
+    numberOfCarvingNodes = 0;
+    numberOfLeafs = 0;
+    numberOfCarvingNodeSets = 0;
+    setsWithZero = 0;
+    setsWithOne = 0;
+    setsWithTwo = 0;
+    setsWithThree = 0;
+    smallSplittingNodes = 0;
+    mediumSplittingNodes = 0;
+    bigSplittingNodes = 0;
+}
+
+void WDSTAggregate::printWDSTStats() {
+    std::cout << '\n' << '\n' << '\n';
+    std::cout << "SAH cost:                                 " << overallSAHCost << '\n';
+    std::cout << "Number of Nodes:                          " << numberOfNodes << '\n';
+    int storageInByte =
+        4 * (numberOfLeafs + numberOfCarvingNodes * 3 + smallSplittingNodes * 4 +
+             mediumSplittingNodes * 6 + bigSplittingNodes * 8); 
+    std::cout << "Storage in Byte:                          " << storageInByte << '\n';
+    float sumPlaneIntersections = 0;
+    float sumTriangleIntersections = 0;
+    int rays = planeIntersectionsPerRay.size();
+    for (int i = 0; i < rays; i++) {
+        sumPlaneIntersections += planeIntersectionsPerRay.front();
+        planeIntersectionsPerRay.pop_front();
+        sumTriangleIntersections += triangleIntersectionsPerRay.front();
+        triangleIntersectionsPerRay.pop_front();
+    }
+    std::cout << "Average Triangle Intersections per Ray:   " << sumTriangleIntersections / rays << '\n';
+    std::cout << "Average Plane Intersections per Ray:      " << sumPlaneIntersections / rays << '\n' << '\n';
+    std::cout << "Number of Splitting Nodes:                " << numberOfSplittingNodes << '\n';
+    std::cout << "Number of Carving Nodes:                  " << numberOfCarvingNodes << '\n';
+    std::cout << "Number of Leafs:                          " << numberOfLeafs << '\n' << '\n';
+    std::cout << "Number of Carving Node Sets:              " << numberOfCarvingNodeSets << '\n';
+    std::cout << "Number of Sets size 0:                    " << setsWithZero << '\n';
+    std::cout << "Number of Sets size 1:                    " << setsWithOne << '\n';
+    std::cout << "Number of Sets size 2:                    " << setsWithTwo << '\n';
+    std::cout << "Number of Sets size 3:                    " << setsWithThree << '\n' << '\n';
+    std::cout << "Number of SNs with 2 Children             " << smallSplittingNodes << '\n';
+    std::cout << "Number of SNs with 2 Children             " << mediumSplittingNodes << '\n';
+    std::cout << "Number of SNs with 2 Children             " << bigSplittingNodes << '\n' << '\n' << '\n';
+}
 
 void printBVH(BVHBuildNode node, int depth) {
     std::string out;
