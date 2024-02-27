@@ -44,7 +44,7 @@ class Primitive
                                                 Float tMax = Infinity) const;
     bool IntersectP(const Ray &r, Float tMax = Infinity) const;
     void setLast();
-    bool isLast();
+    bool isLast() const ;
 
     private:
     bool last = false;

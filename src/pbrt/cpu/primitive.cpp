@@ -35,7 +35,7 @@ void Primitive::setLast() {
     this->last = true;
 }
 
-bool Primitive::isLast() {
+bool Primitive::isLast() const {
     return last;
 }
 

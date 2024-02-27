@@ -1380,7 +1380,8 @@ Bounds3f DSTAggregate::Bounds() const {
 }
 
 pstd::optional<ShapeIntersection> DSTAggregate::Intersect(const Ray &ray,
-                                                          Float globalTMax) {
+                                                          Float globalTMax) const {
+    std::cout << "I";
     pstd::optional<ShapeIntersection> si;
     // For code documentation look at DST supplemental materials Listing 7. DST Traversal Kernel
     float tMin = 0;
@@ -1412,8 +1413,10 @@ pstd::optional<ShapeIntersection> DSTAggregate::Intersect(const Ray &ray,
                 goto leaf;
             }
             float splitPlanes[2];
-            splitPlanes[0] = *reinterpret_cast<float*>(&linearDST[idx + 1]);
-            splitPlanes[1] = *reinterpret_cast<float*>(&linearDST[idx + 2]);
+            uint32_t temp1 = linearDST[idx + 1];
+            splitPlanes[0] = *reinterpret_cast<float*>(&temp1);
+            uint32_t temp2 = linearDST[idx + 2];
+            splitPlanes[1] = *reinterpret_cast<float*>(&temp2);
             idx = headerOffset & OFFSET;
 
             unsigned axis = header5 >> 2;
@@ -1446,8 +1449,10 @@ pstd::optional<ShapeIntersection> DSTAggregate::Intersect(const Ray &ray,
             }
         } else {
             float carvePlanes[2];
-            carvePlanes[0] = *reinterpret_cast<float*>(&linearDST[idx + 1]);
-            carvePlanes[1] = *reinterpret_cast<float*>(&linearDST[idx + 2]);
+            uint32_t temp1 = linearDST[idx + 1];
+            carvePlanes[0] = *reinterpret_cast<float*>(&temp1);
+            uint32_t temp2 = linearDST[idx + 2];
+            carvePlanes[1] = *reinterpret_cast<float*>(&temp2);
 
             char carveType1 = header5 >> 2 & 3;
             char carveType2 = header5 & 3;
@@ -1530,7 +1535,8 @@ pstd::optional<ShapeIntersection> DSTAggregate::Intersect(const Ray &ray,
     return si;
 }
 
-bool DSTAggregate::IntersectP(const Ray &ray, Float globalTMax) {
+bool DSTAggregate::IntersectP(const Ray &ray, Float globalTMax) const {
+    std::cout << "P";
     //For code documentation look at DST supplemental materials Listing 7. DST Traversal Kernel
     float tMin = 0;
     float tMax = globalTMax;
@@ -1561,8 +1567,10 @@ bool DSTAggregate::IntersectP(const Ray &ray, Float globalTMax) {
                 goto leaf;
             }
             float splitPlanes[2];
-            splitPlanes[0] = *reinterpret_cast<float*>(&linearDST[idx + 1]);
-            splitPlanes[1] = *reinterpret_cast<float*>(&linearDST[idx + 2]);
+            uint32_t temp1 = linearDST[idx + 1];
+            splitPlanes[0] = *reinterpret_cast<float*>(&temp1);
+            uint32_t temp2 = linearDST[idx + 2];
+            splitPlanes[1] = *reinterpret_cast<float*>(&temp2);
             idx = headerOffset & OFFSET;
 
             unsigned axis = header5 >> 2;
@@ -1595,8 +1603,10 @@ bool DSTAggregate::IntersectP(const Ray &ray, Float globalTMax) {
             }
         } else {
             float carvePlanes[2];
-            carvePlanes[0] = *reinterpret_cast<float*>(&linearDST[idx + 1]);
-            carvePlanes[1] = *reinterpret_cast<float*>(&linearDST[idx + 2]);
+            uint32_t temp1 = linearDST[idx + 1];
+            carvePlanes[0] = *reinterpret_cast<float*>(&temp1);
+            uint32_t temp2 = linearDST[idx + 2];
+            carvePlanes[1] = *reinterpret_cast<float*>(&temp2);
 
             char carveType1 = header5 >> 2 & 3;
             char carveType2 = header5 & 3;
@@ -2149,6 +2159,7 @@ struct WDSTBuildNode {
             size += 2;
         if (children[3] != NULL)
             size += 2;
+        return size;
     }
     int GetDepthLevel() const { return depthLevel; }
 
@@ -2210,7 +2221,7 @@ Bounds3f WDSTAggregate::Bounds() const {
 }
 
 pstd::optional<ShapeIntersection> WDSTAggregate::Intersect(const Ray &ray,
-                                                           Float globalTMax) {
+                                                           Float globalTMax) const {
     pstd::optional<ShapeIntersection> si;
     float tMin = 0;
     float tMax = globalTMax;
@@ -2542,7 +2553,7 @@ pstd::optional<ShapeIntersection> WDSTAggregate::Intersect(const Ray &ray,
     return si;
 }
 
-bool WDSTAggregate::IntersectP(const Ray &ray, Float globalTMax) {
+bool WDSTAggregate::IntersectP(const Ray &ray, Float globalTMax) const {
     float tMin = 0;
     float tMax = globalTMax;
 
@@ -3065,8 +3076,8 @@ DSTBuildNode *getNextRelevantNode(DSTBuildNode *node) {
 
 WDSTBuildNode *transformDSTNode(ThreadLocal<Allocator> &threadAllocators, DSTBuildNode node, int currentDepth) {
     Allocator alloc = threadAllocators.Get();
-    WDSTBuildNode returnNode = *alloc.new_object<WDSTBuildNode>();
-    WDSTBuildNode *wdstNode = &returnNode;
+    WDSTBuildNode *returnNode = alloc.new_object<WDSTBuildNode>();
+    WDSTBuildNode *wdstNode = returnNode;
     while (node.IsCarving()  && !node.isCarvingLeaf()) {
         WDSTBuildNode *nextNode = alloc.new_object<WDSTBuildNode>();
         wdstNode->InitExistingCarving(node.Plane1(), node.Plane2(), nextNode, node.GetHeader(), 0, node.GetBB(), currentDepth++);
@@ -3078,7 +3089,7 @@ WDSTBuildNode *transformDSTNode(ThreadLocal<Allocator> &threadAllocators, DSTBui
     } else {
         wdstNode->InitLeaf(node.offsetToFirstChild(), currentDepth);
     }
-    return &returnNode;
+    return returnNode;
 }
 
 WDSTBuildNode *determineCNConstelation(ThreadLocal<Allocator> &threadAllocators, Bounds3f parentBB, DSTBuildNode *nextRelevantDSTNode, float S, int currentDepth) {
