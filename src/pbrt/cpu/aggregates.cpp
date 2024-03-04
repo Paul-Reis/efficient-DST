@@ -26,8 +26,38 @@ STAT_MEMORY_COUNTER("Memory/BVH", treeBytes);
 STAT_RATIO("BVH/Primitives per leaf node", totalPrimitives, totalLeafNodes);
 STAT_COUNTER("BVH/Interior nodes", interiorNodes);
 STAT_COUNTER("BVH/Leaf nodes", leafNodes);
+STAT_COUNTER("BVH/SAH Cost", bvhOverallSAHCost);//TODO: count SAH
 STAT_PIXEL_COUNTER("BVH/Nodes visited", bvhNodesVisited);
-STAT_PIXEL_COUNTER("BVH/Plane Intersections", bvhPlaneIntersections)
+
+STAT_RATIO("DST/Average Plane Intersection Tests per Ray", dstPlaneIntersections, dstRays);
+STAT_RATIO("DST/Average Triangle Intersection Tests per Ray", dstTriangleIntersections, dstRays1);
+STAT_COUNTER("DST/SAH Cost", dstOverallSAHCost);//TODO: should be a float counter but float counter does not work
+STAT_COUNTER("DST/Nodes", dstNumberOfNodes);
+STAT_COUNTER("DST/Splitting Nodes", dstNumberOfSplittingNodes);
+STAT_COUNTER("DST/Carving Nodes", dstNumberOfCarvingNodes);
+STAT_COUNTER("DST/Leafs", dstNumberOfLeafs);
+STAT_COUNTER("DST/Carving Node Sets", dstNumberOfCarvingNodeSets);
+STAT_COUNTER("DST/Carving Node Sets Size 0", dstSetsWithZero);
+STAT_COUNTER("DST/Carving Node Sets Size 1", dstSetsWithOne);
+STAT_COUNTER("DST/Carving Node Sets Size 2", dstSetsWithTwo);
+STAT_COUNTER("DST/Carving Node Sets Size 3", dstSetsWithThree);
+
+STAT_RATIO("WDST/Average Plane Intersection Tests per Ray", wdstPlaneIntersections, wdstRays);
+STAT_RATIO("WDST/Average Triangle Intersection Tests per Ray", wdstTriangleIntersections, wdstRays1);
+STAT_COUNTER("WDST/SAH Cost", overallSAHCost);//TODO: should be a float counter but float counter does not work
+STAT_COUNTER("WDST/Nodes", numberOfNodes);
+STAT_COUNTER("WDST/Splitting Nodes", numberOfSplittingNodes);
+STAT_COUNTER("WDST/Carving Nodes", numberOfCarvingNodes);
+STAT_COUNTER("WDST/Leafs", numberOfLeafs);
+STAT_COUNTER("WDST/Carving Node Sets", numberOfCarvingNodeSets);
+STAT_COUNTER("WDST/Carving Node Sets Size 0", setsWithZero);
+STAT_COUNTER("WDST/Carving Node Sets Size 1", setsWithOne);
+STAT_COUNTER("WDST/Carving Node Sets Size 2", setsWithTwo);
+STAT_COUNTER("WDST/Carving Node Sets Size 3", setsWithThree);
+STAT_COUNTER("WDST/Small Splitting Nodes", smallSplittingNodes)
+STAT_COUNTER("WDST/Medium Splitting Nodes", mediumSplittingNodes);
+STAT_COUNTER("WDST/Big Splitting Nodes", bigSplittingNodes);
+
 
 uint32_t IS_LEAF = 0b00000100000000000000000000000000;
 uint32_t IS_CARVING = 0b10000000000000000000000000000000;
@@ -1309,7 +1339,6 @@ DSTAggregate::DSTAggregate(std::vector<Primitive> prims, LinearBVHNode *BVHNodes
                            DSTBuildNode *rootNode)
     : primitives(std::move(prims)) {
     CHECK(!primitives.empty());
-        this->initStatValues();
 
     pstd::pmr::monotonic_buffer_resource resource;
     Allocator alloc(&resource);
@@ -1337,7 +1366,7 @@ DSTAggregate::DSTAggregate(std::vector<Primitive> prims, LinearBVHNode *BVHNodes
             } else {
                 offset = offset + 3;
             }
-            numberOfNodes++;
+            dstNumberOfNodes++;
             nodesPerDepthLevel[i].pop_front();
         }
     }
@@ -1353,16 +1382,16 @@ void DSTAggregate::FlattenDST(DSTBuildNode *node) {
     uint32_t offset = node->Offset();
     if (node->IsLeaf()) {
         linearDST[offset] = node->GetFlag();
-        numberOfLeafs++;
+        dstNumberOfLeafs++;
     } else {
         uint32_t flag = node->GetFlag();
         flag |= node->offsetToFirstChild();
         if (node->IsSplitting()) {
             int leftChildSize = (!node->children[0]->IsLeaf()) * 2 + 1;
             flag |= leftChildSize << 27;
-            numberOfSplittingNodes++;
+            dstNumberOfSplittingNodes++;
         } else {
-            numberOfCarvingNodes++;
+            dstNumberOfCarvingNodes++;
         }
         linearDST[offset] = flag;
         linearDST[offset + 1] = node->Plane1();
@@ -1388,6 +1417,8 @@ Bounds3f DSTAggregate::Bounds() const {
 
 pstd::optional<ShapeIntersection> DSTAggregate::Intersect(const Ray &ray,
                                                           Float globalTMax) const {
+    dstRays++;
+    dstRays1++;
     pstd::optional<ShapeIntersection> si;
     // For code documentation look at DST supplemental materials Listing 7. DST Traversal Kernel
     float tMin = 0;
@@ -1432,6 +1463,7 @@ pstd::optional<ShapeIntersection> DSTAggregate::Intersect(const Ray &ray,
             float ts2 = (splitPlanes[sign ^ 1] - ray.o[axis]) * invDir[axis];
 
             sign *= diff;
+            dstPlaneIntersections += 2;
             if (tMax >= ts2) {
                 float tNext = std::max(tMin, ts2);
                 if (tMin <= ts1) {
@@ -1470,6 +1502,7 @@ pstd::optional<ShapeIntersection> DSTAggregate::Intersect(const Ray &ray,
                     (carvePlanes[sign ^ 1] - ray.o[carveType2]) * invDir[carveType2];
                 tMax = std::min(ts1, tMax);
                 tMin = std::max(ts2, tMin);
+                dstPlaneIntersections++;
                 if (tMin > tMax)
                     goto pop;
                 int offset = headerOffset & OFFSET;
@@ -1500,6 +1533,7 @@ pstd::optional<ShapeIntersection> DSTAggregate::Intersect(const Ray &ray,
 
                 tMin = std::max(tMin, std::max(tMin0, tMin1));
                 tMax = std::min(tMax, std::min(tMax0, tMax1));
+                dstPlaneIntersections++;
                 if (tMin > tMax)
                     goto pop;
                 int offset = headerOffset & OFFSET;
@@ -1514,6 +1548,7 @@ pstd::optional<ShapeIntersection> DSTAggregate::Intersect(const Ray &ray,
 
     leaf:
         for (unsigned i = idx;; i++) {
+            dstTriangleIntersections++;
             pstd::optional<ShapeIntersection> primSi = primitives[i].Intersect(ray, tMax);
             if (primSi.has_value()) {
                 si = primSi;
@@ -1542,6 +1577,7 @@ pstd::optional<ShapeIntersection> DSTAggregate::Intersect(const Ray &ray,
 }
 
 bool DSTAggregate::IntersectP(const Ray &ray, Float globalTMax) const {
+    dstRays++;
     //For code documentation look at DST supplemental materials Listing 7. DST Traversal Kernel
     float tMin = 0;
     float tMax = globalTMax;
@@ -1585,6 +1621,7 @@ bool DSTAggregate::IntersectP(const Ray &ray, Float globalTMax) const {
             float ts2 = (splitPlanes[sign ^ 1] - ray.o[axis]) * invDir[axis];
 
             sign *= diff;
+            dstPlaneIntersections += 2;
             if (tMax >= ts2) {
                 float tNext = std::max(tMin, ts2);
                 if (tMin <= ts1) {
@@ -1622,6 +1659,7 @@ bool DSTAggregate::IntersectP(const Ray &ray, Float globalTMax) const {
                 float ts2 = (carvePlanes[sign ^ 1] - ray.o[carveType2]) * invDir[carveType2];
                 tMax = std::min(ts1, tMax);
                 tMin = std::max(ts2, tMin);
+                dstPlaneIntersections++;
                 if (tMin > tMax)
                     goto pop;
                 int offset = headerOffset & OFFSET;
@@ -1652,6 +1690,7 @@ bool DSTAggregate::IntersectP(const Ray &ray, Float globalTMax) const {
 
                 tMin = std::max(tMin, std::max(tMin0, tMin1));
                 tMax = std::min(tMax, std::min(tMax0, tMax1));
+                dstPlaneIntersections++;
                 if (tMin > tMax) 
                     goto pop;
                 int offset = headerOffset & OFFSET;
@@ -1666,6 +1705,7 @@ bool DSTAggregate::IntersectP(const Ray &ray, Float globalTMax) const {
 
     leaf:
         for (unsigned i = idx;; i++) {
+            dstTriangleIntersections++;
             if (primitives[i].Intersect(ray, tMax))
                 return true;
             // Test if last Triangle in node
@@ -1780,7 +1820,7 @@ DSTBuildNode *DSTAggregate::BuildRecursiveFromBVH(ThreadLocal<Allocator> &thread
             bestSAH = sumSAH;
         }
     }
-    overallSAHCost += bestSAH;
+    dstOverallSAHCost += bestSAH;
 
     bool lastLeftChildIsLeaf = leftChildNodeBVH.nPrimitives;
     bool lastRightChildIsLeaf = rightChildNodeBVH.nPrimitives;
@@ -1838,13 +1878,13 @@ DSTBuildNode *DSTAggregate::BuildRecursiveFromBVH(ThreadLocal<Allocator> &thread
     else  if (!lastLeftChildIsLeaf)
         *nextNodeP1 = *BuildRecursiveFromBVH(threadAllocators, nodes, currentNodeIndex + 1, depthLevel +1);
     if (setSize == 0) {
-        setsWithZero++;
+        dstSetsWithZero++;
     } else if (setSize == 1) {
-        setsWithOne++;
+        dstSetsWithOne++;
     } else if(setSize == 2) {
-        setsWithTwo++;
+        dstSetsWithTwo++;
     } else {
-        setsWithThree++;
+        dstSetsWithThree++;
     }
 
     nextCarvingNode = 6;
@@ -1902,15 +1942,15 @@ DSTBuildNode *DSTAggregate::BuildRecursiveFromBVH(ThreadLocal<Allocator> &thread
     else if (!lastRightChildIsLeaf)
         *nextNodeP2 = *BuildRecursiveFromBVH(threadAllocators, nodes, parentNodeBVH.secondChildOffset, depthLevel + 1);
     if (setSize == 0) {
-        setsWithZero++;
+        dstSetsWithZero++;
     } else if (setSize == 1) {
-        setsWithOne++;
+        dstSetsWithOne++;
     } else if (setSize == 2) {
-        setsWithTwo++;
+        dstSetsWithTwo++;
     } else {
-        setsWithThree++;
+        dstSetsWithThree++;
     }
-    numberOfCarvingNodeSets += 2;
+    dstNumberOfCarvingNodeSets += 2;
     node->InitSplittingNode(bestNodeComposition[12], leftChildNode, rightChildNode,
                             currentDepth, bestNodesPlanes[12], bestNodesPlanes[13], parentNodeBVH.bounds);
 
@@ -2139,19 +2179,7 @@ void DSTAggregate::addNodeToDepthList(DSTBuildNode* node) {
     }
 }
 
-void DSTAggregate::initStatValues() {
-    overallSAHCost = 0;
-    numberOfNodes = 0;
-    numberOfSplittingNodes = 0;
-    numberOfCarvingNodes = 0;
-    numberOfLeafs = 0;
-    numberOfCarvingNodeSets = 0;
-    setsWithZero = 0;
-    setsWithOne = 0;
-    setsWithTwo = 0;
-    setsWithThree = 0;
-}
-
+/*
 void DSTAggregate::printDSTStats() {
     std::cout << '\n' << '\n' << '\n';
     std::cout << "SAH cost:                                 " << overallSAHCost << '\n';
@@ -2177,7 +2205,7 @@ void DSTAggregate::printDSTStats() {
     std::cout << "Number of Sets size 1:                    " << setsWithOne << '\n';
     std::cout << "Number of Sets size 2:                    " << setsWithTwo << '\n';
     std::cout << "Number of Sets size 3:                    " << setsWithThree << '\n' << '\n' << '\n';
-}
+}*/
 
 StackItem::StackItem(int idx, float tMin, float tMax) {
     this->idx = idx;
@@ -2244,7 +2272,6 @@ struct WDSTBuildNode {
 WDSTAggregate::WDSTAggregate(std::vector<Primitive> prims, DSTBuildNode node, Bounds3f globalBB)
     : primitives(std::move(prims)) {
     CHECK(!primitives.empty());
-    this->initStatValues();
 
     pstd::pmr::monotonic_buffer_resource resource;
     Allocator alloc(&resource);
@@ -2292,6 +2319,8 @@ Bounds3f WDSTAggregate::Bounds() const {
 
 pstd::optional<ShapeIntersection> WDSTAggregate::Intersect(const Ray &ray,
                                                            Float globalTMax) const {
+    wdstRays++;
+    wdstRays1++;
     pstd::optional<ShapeIntersection> si;
     float tMin = 0;
     float tMax = globalTMax;
@@ -2343,6 +2372,7 @@ pstd::optional<ShapeIntersection> WDSTAggregate::Intersect(const Ray &ray,
             float ts1 = (splitPlanes[sign] - ray.o[axes[0]]) * invDir[axes[0]];
             float ts2 = (splitPlanes[sign ^ 1] - ray.o[axes[0]]) * invDir[axes[0]];
 
+            wdstPlaneIntersections += 2;
             if (tMax >= ts2) {
                 float tNext = std::max(tMin, ts2);
                 if (tMin <= ts1) {
@@ -2354,6 +2384,7 @@ pstd::optional<ShapeIntersection> WDSTAggregate::Intersect(const Ray &ray,
                         int previousChildren = sign * ((whereDoubleChildren >> 1) + 1);
                         float ts3 = (splitPlanes[2 + internalSign + sign * (amountOfChildren == 4)] - ray.o[axis]) * invDir[axis];
                         float ts4 = (splitPlanes[2 + (internalSign ^ 1) + sign * (amountOfChildren == 4)] - ray.o[axis]) * invDir[axis];
+                        wdstPlaneIntersections += 2;
                         if (localTMax >= ts4) {
                             float localTNext = std::max(tMin, ts4);
                             if (tMin <= ts3) {
@@ -2397,6 +2428,7 @@ pstd::optional<ShapeIntersection> WDSTAggregate::Intersect(const Ray &ray,
                         int previousChildren = (sign ^ 1) * ((whereDoubleChildren >> 1) + 1);
                         float ts3 = (splitPlanes[2 + internalSign + (sign ^ 1) * (amountOfChildren == 4)] - ray.o[axis]) * invDir[axis];
                         float ts4 = (splitPlanes[2 + (internalSign ^ 1) + (sign ^ 1) * (amountOfChildren == 4)] - ray.o[axis]) * invDir[axis];
+                        wdstPlaneIntersections += 2;
                         if (tMax >= ts4) {
                             float localTNext = std::max(localTMin, ts4);
                             if (tMin <= ts3) {
@@ -2447,6 +2479,7 @@ pstd::optional<ShapeIntersection> WDSTAggregate::Intersect(const Ray &ray,
                         int previousChildren = (sign ^ 1) * ((whereDoubleChildren >> 1) + 1);
                         float ts3 = (splitPlanes[2 + internalSign + (sign ^ 1) * (amountOfChildren == 4)] - ray.o[axis]) * invDir[axis];
                         float ts4 = (splitPlanes[2 + (internalSign ^ 1) + (sign ^ 1) * (amountOfChildren == 4)] - ray.o[axis]) * invDir[axis];
+                        wdstPlaneIntersections += 2;
                         if (tMax >= ts4) {
                             float internalTNext = std::max(tMin, ts4);
                             if (tMin <= ts3) {
@@ -2494,6 +2527,7 @@ pstd::optional<ShapeIntersection> WDSTAggregate::Intersect(const Ray &ray,
                         int previousChildren = sign * ((whereDoubleChildren >> 1) + 1);
                         float ts3 = (splitPlanes[2 + internalSign + sign * (amountOfChildren == 4)] - ray.o[axis]) * invDir[axis];
                         float ts4 = (splitPlanes[2 + (internalSign ^ 1) +  sign * (amountOfChildren == 4)] - ray.o[axis]) * invDir[axis];
+                        wdstPlaneIntersections += 2;
                         if (tMax >= ts4) {
                             float internalTNext = std::max(tMin, ts4);
                             if (tMin <= ts3) {
@@ -2550,6 +2584,7 @@ pstd::optional<ShapeIntersection> WDSTAggregate::Intersect(const Ray &ray,
                     (carvePlanes[sign ^ 1] - ray.o[carveType2]) * invDir[carveType2];
                 tMax = std::min(ts1, tMax);
                 tMin = std::max(ts2, tMin);
+                wdstPlaneIntersections++;
                 if (tMin > tMax)
                     goto pop;
                 int offset = headerOffset & OFFSET;
@@ -2580,6 +2615,7 @@ pstd::optional<ShapeIntersection> WDSTAggregate::Intersect(const Ray &ray,
 
                 tMin = std::max(tMin, std::max(tMin0, tMin1));
                 tMax = std::min(tMax, std::min(tMax0, tMax1));
+                wdstPlaneIntersections++;
                 if (tMin > tMax)
                     goto pop;
                 int offset = headerOffset & OFFSET;
@@ -2594,6 +2630,7 @@ pstd::optional<ShapeIntersection> WDSTAggregate::Intersect(const Ray &ray,
 
     leaf:
         for (unsigned i = idx;; i++) {
+            wdstTriangleIntersections++;
             pstd::optional<ShapeIntersection> primSi = primitives[i].Intersect(ray, tMax);
             if (primSi.has_value()) {
                 si = primSi;
@@ -2624,6 +2661,7 @@ pstd::optional<ShapeIntersection> WDSTAggregate::Intersect(const Ray &ray,
 }
 
 bool WDSTAggregate::IntersectP(const Ray &ray, Float globalTMax) const {
+    wdstRays++;
     float tMin = 0;
     float tMax = globalTMax;
 
@@ -2675,6 +2713,7 @@ bool WDSTAggregate::IntersectP(const Ray &ray, Float globalTMax) const {
             float ts1 = (splitPlanes[sign] - ray.o[axes[0]]) * invDir[axes[0]];
             float ts2 = (splitPlanes[sign ^ 1] - ray.o[axes[0]]) * invDir[axes[0]];
 
+            wdstPlaneIntersections += 2;
             if (tMax >= ts2) {
                 float tNext = std::max(tMin, ts2);
                 if (tMin <= ts1) {
@@ -2692,6 +2731,7 @@ bool WDSTAggregate::IntersectP(const Ray &ray, Float globalTMax) const {
                                                  sign * (amountOfChildren == 4)] -
                                      ray.o[axis]) *
                                     invDir[axis];
+                        wdstPlaneIntersections += 2;
                         if (localTMax >= ts4) {
                             float localTNext = std::max(tMin, ts4);
                             if (tMin <= ts3) {
@@ -2747,6 +2787,7 @@ bool WDSTAggregate::IntersectP(const Ray &ray, Float globalTMax) const {
                                                  (sign ^ 1) * (amountOfChildren == 4)] -
                                      ray.o[axis]) *
                                     invDir[axis];
+                        wdstPlaneIntersections += 2;
                         if (tMax >= ts4) {
                             float localTNext = std::max(localTMin, ts4);
                             if (tMin <= ts3) {
@@ -2808,6 +2849,7 @@ bool WDSTAggregate::IntersectP(const Ray &ray, Float globalTMax) const {
                                                  (sign ^ 1) * (amountOfChildren == 4)] -
                                      ray.o[axis]) *
                                     invDir[axis];
+                        wdstPlaneIntersections += 2;
                         if (tMax >= ts4) {
                             float internalTNext = std::max(tMin, ts4);
                             if (tMin <= ts3) {
@@ -2862,6 +2904,7 @@ bool WDSTAggregate::IntersectP(const Ray &ray, Float globalTMax) const {
                                                  sign * (amountOfChildren == 4)] -
                                      ray.o[axis]) *
                                     invDir[axis];
+                        wdstPlaneIntersections += 2;
                         if (tMax >= ts4) {
                             float internalTNext = std::max(tMin, ts4);
                             if (tMin <= ts3) {
@@ -2919,6 +2962,7 @@ bool WDSTAggregate::IntersectP(const Ray &ray, Float globalTMax) const {
                     (carvePlanes[sign ^ 1] - ray.o[carveType2]) * invDir[carveType2];
                 tMax = std::min(ts1, tMax);
                 tMin = std::max(ts2, tMin);
+                wdstPlaneIntersections++;
                 if (tMin > tMax)
                     goto pop;
                 int offset = headerOffset & OFFSET;
@@ -2949,6 +2993,7 @@ bool WDSTAggregate::IntersectP(const Ray &ray, Float globalTMax) const {
 
                 tMin = std::max(tMin, std::max(tMin0, tMin1));
                 tMax = std::min(tMax, std::min(tMax0, tMax1));
+                wdstPlaneIntersections++;
                 if (tMin > tMax)
                     goto pop;
                 int offset = headerOffset & OFFSET;
@@ -2963,6 +3008,7 @@ bool WDSTAggregate::IntersectP(const Ray &ray, Float globalTMax) const {
 
     leaf:
         for (unsigned i = idx;; i++) {
+            wdstTriangleIntersections++;
             if (primitives[i].Intersect(ray, tMax))
                 return true;
             // Test if last Triangle in node
@@ -3184,7 +3230,7 @@ WDSTBuildNode *WDSTAggregate::determineCNConstelation(
     DSTBuildNode *nextRelevantDSTNode, float S, int currentDepth, float *SAH) {
     Allocator alloc = threadAllocators.Get();
     WDSTBuildNode *node = alloc.new_object<WDSTBuildNode>();
-    this->numberOfCarvingNodeSets++;
+    numberOfCarvingNodeSets++;
 
     Bounds3f childBB = nextRelevantDSTNode->GetBB();
     std::vector<int> sidesToCarve;
@@ -3372,54 +3418,6 @@ void WDSTAggregate::addNodeToDepthList(WDSTBuildNode *node) {
         if (child != NULL)
             addNodeToDepthList(child);
     }
-}
-
-void WDSTAggregate::initStatValues() {
-    overallSAHCost = 0;
-    numberOfNodes = 0;
-    numberOfSplittingNodes = 0;
-    numberOfCarvingNodes = 0;
-    numberOfLeafs = 0;
-    numberOfCarvingNodeSets = 0;
-    setsWithZero = 0;
-    setsWithOne = 0;
-    setsWithTwo = 0;
-    setsWithThree = 0;
-    smallSplittingNodes = 0;
-    mediumSplittingNodes = 0;
-    bigSplittingNodes = 0;
-}
-
-void WDSTAggregate::printWDSTStats() {
-    std::cout << '\n' << '\n' << '\n';
-    std::cout << "SAH cost:                                 " << overallSAHCost << '\n';
-    std::cout << "Number of Nodes:                          " << numberOfNodes << '\n';
-    int storageInByte =
-        4 * (numberOfLeafs + numberOfCarvingNodes * 3 + smallSplittingNodes * 4 +
-             mediumSplittingNodes * 6 + bigSplittingNodes * 8); 
-    std::cout << "Storage in Byte:                          " << storageInByte << '\n';
-    float sumPlaneIntersections = 0;
-    float sumTriangleIntersections = 0;
-    int rays = planeIntersectionsPerRay.size();
-    for (int i = 0; i < rays; i++) {
-        sumPlaneIntersections += planeIntersectionsPerRay.front();
-        planeIntersectionsPerRay.pop_front();
-        sumTriangleIntersections += triangleIntersectionsPerRay.front();
-        triangleIntersectionsPerRay.pop_front();
-    }
-    std::cout << "Average Triangle Intersections per Ray:   " << sumTriangleIntersections / rays << '\n';
-    std::cout << "Average Plane Intersections per Ray:      " << sumPlaneIntersections / rays << '\n' << '\n';
-    std::cout << "Number of Splitting Nodes:                " << numberOfSplittingNodes << '\n';
-    std::cout << "Number of Carving Nodes:                  " << numberOfCarvingNodes << '\n';
-    std::cout << "Number of Leafs:                          " << numberOfLeafs << '\n' << '\n';
-    std::cout << "Number of Carving Node Sets:              " << numberOfCarvingNodeSets << '\n';
-    std::cout << "Number of Sets size 0:                    " << setsWithZero << '\n';
-    std::cout << "Number of Sets size 1:                    " << setsWithOne << '\n';
-    std::cout << "Number of Sets size 2:                    " << setsWithTwo << '\n';
-    std::cout << "Number of Sets size 3:                    " << setsWithThree << '\n' << '\n';
-    std::cout << "Number of SNs with 2 Children             " << smallSplittingNodes << '\n';
-    std::cout << "Number of SNs with 2 Children             " << mediumSplittingNodes << '\n';
-    std::cout << "Number of SNs with 2 Children             " << bigSplittingNodes << '\n' << '\n' << '\n';
 }
 
 void printBVH(BVHBuildNode node, int depth) {

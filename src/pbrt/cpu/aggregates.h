@@ -137,8 +137,6 @@ class DSTAggregate {
                                    int currentNodeIndex, int currentDepth);
     void FlattenDST(DSTBuildNode *node);
     void addNodeToDepthList(DSTBuildNode *node);
-    void DSTAggregate::initStatValues();
-    void printDSTStats();
 
     // DSTAggregate Private Members
     std::vector<Primitive> primitives;
@@ -146,20 +144,6 @@ class DSTAggregate {
 
     std::vector<std::list<DSTBuildNode*>> nodesPerDepthLevel;
     int maximumDepth;
-
-    // Stats for evaluation
-    float overallSAHCost;
-    int numberOfNodes;
-    std::list<int> triangleIntersectionsPerRay; //intersect
-    std::list<int> planeIntersectionsPerRay;    //intersect
-    int numberOfSplittingNodes;
-    int numberOfCarvingNodes;
-    int numberOfLeafs;
-    int numberOfCarvingNodeSets;
-    int setsWithZero;
-    int setsWithOne;
-    int setsWithTwo;
-    int setsWithThree;  
 };
 
 class StackItem {
@@ -209,8 +193,6 @@ class WDSTAggregate {
                                            Bounds3f parentBB,
                                            DSTBuildNode *nextRelevantDSTNode, float S,
                                            int currentDepth, float *SAH);
-    void WDSTAggregate::initStatValues();
-    void printWDSTStats();
 
     std::vector<Primitive> primitives;
     std::vector<uint32_t> linearWDST;
@@ -218,23 +200,6 @@ class WDSTAggregate {
 
     std::vector<std::list<WDSTBuildNode *>> nodesPerDepthLevel;
     int maximumDepth;
-
-    //Stats for evaluation
-    float overallSAHCost;
-    int numberOfNodes;
-    std::list<int> triangleIntersectionsPerRay;  //
-    std::list<int> planeIntersectionsPerRay;     //
-    int numberOfSplittingNodes;
-    int numberOfCarvingNodes;
-    int numberOfLeafs;
-    int numberOfCarvingNodeSets;
-    int setsWithZero;
-    int setsWithOne;
-    int setsWithTwo;
-    int setsWithThree;
-    int smallSplittingNodes;
-    int mediumSplittingNodes;
-    int bigSplittingNodes;
 };
 
 DSTBuildNode *getNextRelevantNode(DSTBuildNode *node);
