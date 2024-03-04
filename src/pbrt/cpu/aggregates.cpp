@@ -28,6 +28,7 @@ STAT_COUNTER("BVH/Interior nodes", interiorNodes);
 STAT_COUNTER("BVH/Leaf nodes", leafNodes);
 STAT_COUNTER("BVH/SAH Cost", bvhOverallSAHCost);//TODO: count SAH
 STAT_PIXEL_COUNTER("BVH/Nodes visited", bvhNodesVisited);
+STAT_COUNTER("BVH/Test for DST", testForDst);
 
 STAT_RATIO("DST/Average Plane Intersection Tests per Ray", dstPlaneIntersections, dstRays);
 STAT_RATIO("DST/Average Triangle Intersection Tests per Ray", dstTriangleIntersections, dstRays1);
@@ -1209,12 +1210,14 @@ KdTreeAggregate *KdTreeAggregate::Create(std::vector<Primitive> prims,
 Primitive CreateAccelerator(const std::string &name, std::vector<Primitive> prims,
                             const ParameterDictionary &parameters) {
     Primitive accel = nullptr;
-    if (name == "bvh")
+    if (name == "bvh") {
+        testForDst += 10;
         accel = BVHAggregate::Create(std::move(prims), parameters);
-    else if (name == "kdtree")
+    } else if (name == "kdtree")
         accel = KdTreeAggregate::Create(std::move(prims), parameters);
     else if (name == "dst") {
-        accel = DSTAggregate::Create(std::move(prims), parameters, 0);
+        accel = DSTAggregate::Create(std::move(prims), parameters, NULL);
+        testForDst += 300;
     } else if (name == "wdst")
         accel = WDSTAggregate::Create(std::move(prims), parameters);
     else 
@@ -1350,7 +1353,7 @@ DSTAggregate::DSTAggregate(std::vector<Primitive> prims, LinearBVHNode *BVHNodes
         return Allocator(ptr);
     });
 
-    DSTBuildNode *root;
+    DSTBuildNode *root = alloc.new_object<DSTBuildNode>();
 
     globalBB = BVHNodes[0].bounds;
     root = BuildRecursiveFromBVH(threadAllocators, BVHNodes, 0, 0);
@@ -1373,7 +1376,8 @@ DSTAggregate::DSTAggregate(std::vector<Primitive> prims, LinearBVHNode *BVHNodes
 
     linearDST.resize(offset);
     FlattenDST(root);
-    *rootNode = *root;
+    if (rootNode != NULL)
+        *rootNode = *root;
 }
 
 void DSTAggregate::FlattenDST(DSTBuildNode *node) {
@@ -1567,7 +1571,10 @@ pstd::optional<ShapeIntersection> DSTAggregate::Intersect(const Ray &ray,
             StackItem item = stack[stackPtr--];
             idx = item.idx;
             tMin = item.tMin;
-            if (tMin < si->tHit) {
+            if (!si.has_value()) {
+                tMax = item.tMax;
+                break;
+            } else if (tMin < si->tHit) {
                 tMax = std::min(si->tHit, item.tMax);
                 break;
             }
@@ -2307,10 +2314,12 @@ WDSTAggregate::WDSTAggregate(std::vector<Primitive> prims, DSTBuildNode node, Bo
 
 WDSTAggregate *WDSTAggregate::Create(std::vector<Primitive> prims,
                                      const ParameterDictionary &parameters) {
-    DSTBuildNode node;
-    DSTAggregate dst = *DSTAggregate::Create(prims, parameters, &node); // TODO: Überlegen, wie ich am elegantesten an die root BuildNode rankomme
+    pstd::pmr::monotonic_buffer_resource resource;
+    Allocator alloc(&resource);
+    DSTBuildNode *node = alloc.new_object<DSTBuildNode>();
+    DSTAggregate dst = *DSTAggregate::Create(prims, parameters, node); // TODO: Überlegen, wie ich am elegantesten an die root BuildNode rankomme
     Bounds3f globalBB = dst.globalBB;
-    return new WDSTAggregate(std::move(prims), node, globalBB);
+    return new WDSTAggregate(std::move(prims), *node, globalBB);
 }
 
 Bounds3f WDSTAggregate::Bounds() const {
@@ -2651,7 +2660,7 @@ pstd::optional<ShapeIntersection> WDSTAggregate::Intersect(const Ray &ray,
             StackItem item = stack[stackPtr--];
             idx = item.idx;
             tMin = item.tMin;
-            if (tMin < si->tHit) {
+            if (!si.has_value() || tMin < si->tHit) {
                 tMax = std::min(si->tHit, item.tMax);
                 break;
             }
