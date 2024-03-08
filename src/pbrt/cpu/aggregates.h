@@ -48,6 +48,8 @@ class BVHAggregate {
     int numberOfNodes;
     std::list<int> triangleIntersectionsPerRay;
     std::list<int> planeIntersectionsPerRay;
+    std::vector<Primitive> primitives;
+    void printBVH(BVHBuildNode node);
 
   private:
     // BVHAggregate Private Methods
@@ -72,7 +74,6 @@ class BVHAggregate {
 
     // BVHAggregate Private Members
     int maxPrimsInNode;
-    std::vector<Primitive> primitives;
     SplitMethod splitMethod;
     LinearBVHNode *nodes = nullptr;
 };
@@ -124,9 +125,8 @@ class DSTAggregate {
 
     Bounds3f Bounds() const;
     pstd::optional<ShapeIntersection> Intersect(const Ray &ray, Float tMax) const;
-    //pstd::optional<ShapeIntersection> Intersect(const Ray &ray, Float tMax);
     bool IntersectP(const Ray &ray, Float tMax) const;
-    //bool IntersectP(const Ray &ray, Float tMax);
+    void printDST(DSTBuildNode node, Bounds3f boundingBox, int depth);
 
     Bounds3f globalBB;
 
@@ -223,8 +223,6 @@ WDSTBuildNode *getLowerEnd(WDSTBuildNode *node);
 Bounds3f carve(Bounds3f parentBB, Bounds3f childBB, std::vector<int> sidesToCarve,
                std::vector<float> &planes);
 
-void printBVH(BVHBuildNode node, int depth);
-void printDST(DSTBuildNode node, int depth);
 }  // namespace pbrt
 
 #endif  // PBRT_CPU_AGGREGATES_H

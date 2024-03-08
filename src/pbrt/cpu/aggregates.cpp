@@ -28,7 +28,7 @@ STAT_COUNTER("BVH/Interior nodes", interiorNodes);
 STAT_COUNTER("BVH/Leaf nodes", leafNodes);
 STAT_COUNTER("BVH/SAH Cost", bvhOverallSAHCost);//TODO: count SAH
 STAT_PIXEL_COUNTER("BVH/Nodes visited", bvhNodesVisited);
-STAT_COUNTER("BVH/Test for DST", testForDst);
+STAT_COUNTER("Accelerator/If 1 BVH, if 10 DST, if 100 WDST", testForDst);
 
 STAT_RATIO("DST/Average Plane Intersection Tests per Ray", dstPlaneIntersections, dstRays);
 STAT_RATIO("DST/Average Triangle Intersection Tests per Ray", dstTriangleIntersections, dstRays1);
@@ -42,6 +42,8 @@ STAT_COUNTER("DST/Carving Node Sets Size 0", dstSetsWithZero);
 STAT_COUNTER("DST/Carving Node Sets Size 1", dstSetsWithOne);
 STAT_COUNTER("DST/Carving Node Sets Size 2", dstSetsWithTwo);
 STAT_COUNTER("DST/Carving Node Sets Size 3", dstSetsWithThree);
+STAT_COUNTER("DST/Single-Axis Carving Nodes", singleAxisCNs);
+STAT_COUNTER("DST/Dual-Axis Carving Nodes", dualAxisCNs);
 
 STAT_RATIO("WDST/Average Plane Intersection Tests per Ray", wdstPlaneIntersections, wdstRays);
 STAT_RATIO("WDST/Average Triangle Intersection Tests per Ray", wdstTriangleIntersections, wdstRays1);
@@ -227,13 +229,37 @@ BVHAggregate::BVHAggregate(std::vector<Primitive> prims, int maxPrimsInNode,
                  primitives.size() * sizeof(primitives[0]);
     nodes = new LinearBVHNode[totalNodes];
     int offset = 0;
-    //printBVH(*root, 0);
+    
+    /*
+    std::cout << "Primitive List:" << '\n';
+    for (int i = 0; i < primitives.size(); i++) {
+        std::cout << primitives[i].Bounds().ToString() << "    " << primitives[i].isLast()
+                  << '\n';
+    }
+    std::cout << '\n' << '\n' << "Primitives in Tree:" << '\n';
+
+    printBVH(*root);
+    */
     flattenBVH(root, &offset);
     CHECK_EQ(totalNodes.load(), offset);
 }
 
 LinearBVHNode* BVHAggregate::getNodes() {
     return nodes;
+}
+
+void BVHAggregate::printBVH(BVHBuildNode node) {
+    if (node.nPrimitives > 0) {
+        for (unsigned i = node.firstPrimOffset; i < node.firstPrimOffset + node.nPrimitives; i++) {
+            std::cout << i << '\n';
+        }
+    } else {
+        for (const auto &child : node.children) {
+            if (child != NULL) {
+                printBVH(*child);
+            }
+        }
+    }
 }
 
 BVHBuildNode *BVHAggregate::buildRecursive(ThreadLocal<Allocator> &threadAllocators,
@@ -1211,16 +1237,20 @@ Primitive CreateAccelerator(const std::string &name, std::vector<Primitive> prim
                             const ParameterDictionary &parameters) {
     Primitive accel = nullptr;
     if (name == "bvh") {
-        testForDst += 10;
+        testForDst += 1;
+        //std::cout << "Bounding Volume Hierarchy" << '\n';
         accel = BVHAggregate::Create(std::move(prims), parameters);
     } else if (name == "kdtree")
         accel = KdTreeAggregate::Create(std::move(prims), parameters);
     else if (name == "dst") {
         accel = DSTAggregate::Create(std::move(prims), parameters, NULL);
-        testForDst += 300;
-    } else if (name == "wdst")
+        testForDst += 10;
+        //std::cout << "Dual-Split Tree" << '\n';
+    } else if (name == "wdst") {
+        testForDst += 100;
+        //std::cout << "Wide Dual-Split Tree" << '\n';
         accel = WDSTAggregate::Create(std::move(prims), parameters);
-    else 
+    } else 
         ErrorExit("%s: accelerator type unknown.", name);
 
     if (!accel)
@@ -1242,15 +1272,18 @@ struct DSTBuildNode {
     void InitSingleAxisCarving(int planeAxis, DSTBuildNode *child, bool leaf,
                                int triangleOffset, int depthLevel, float plane1,
                                float plane2, Bounds3f BB, int nTriangles) {
+        singleAxisCNs++;
         int header = 0b110000;
         header |= leaf;
         header |= planeAxis << 1;
-        flags = header << 26;
-        if (!leaf)
+        if (!leaf) {
             children[0] = child;
+            triangleOffset = 0;
+        }
+        flags = header << 26 | triangleOffset;
         this->depthLevel = depthLevel;
-        this->plane1 = plane1;
-        this->plane2 = plane2;
+        this->plane1 = plane2;
+        this->plane2 = plane1;
         this->triangleOffset = triangleOffset;
         BoundingBox = BB;
         this->nTriangles = nTriangles;
@@ -1259,12 +1292,15 @@ struct DSTBuildNode {
     void InitDoubleAxisCarving(int planeAxesAndCornerType, DSTBuildNode *child, bool leaf,
                                int triangleOffset, int depthLevel, float plane1,
                                float plane2, Bounds3f BB, int nTriangles) {
+        dualAxisCNs++;
         int header = 0b100000;
         header |= leaf;
         header |= planeAxesAndCornerType << 1;
-        flags = header << 26;
-        if (!leaf)
+        if (!leaf) {
             children[0] = child;
+            triangleOffset = 0;
+        }
+        flags = header << 26 | triangleOffset;
         this->depthLevel = depthLevel;
         this->plane1 = plane1;
         this->plane2 = plane2;
@@ -1326,13 +1362,13 @@ struct DSTBuildNode {
     bool isCarvingLeaf() const { return IsCarving() && flags & IS_LEAF; }
 
     DSTBuildNode* children[2] = {NULL, NULL};
-    
+    float plane1 = NULL;
+    float plane2 = NULL;
+
     private:
         int triangleOffset = 0;
         int offset = NULL;
         int depthLevel = NULL;
-        float plane1 = NULL;
-        float plane2 = NULL;
         uint32_t flags;
         Bounds3f BoundingBox;
         int nTriangles = 0;
@@ -1374,10 +1410,31 @@ DSTAggregate::DSTAggregate(std::vector<Primitive> prims, LinearBVHNode *BVHNodes
         }
     }
 
+    /* std::cout << "Primitive List:" << '\n';
+    for (int i = 0; i < primitives.size(); i++) {
+        std::cout << primitives[i].Bounds().ToString() << "    " << primitives[i].isLast() << '\n';
+    }
+    std::cout << '\n' << '\n' << "Primitives in Tree:" << '\n';
+    
+    this->printDST(*root, globalBB, 0);*/
+
     linearDST.resize(offset);
     FlattenDST(root);
-    if (rootNode != NULL)
-        *rootNode = *root;
+
+    /*
+    std::cout << '\n' << "Primitive in liear Tree:" << '\n';
+    int idx = 0;
+    while (idx < linearDST.size()) {
+        int entry = linearDST[idx];
+        if (entry & IS_LEAF) {
+            std::cout << (entry & OFFSET) << '\n';
+            if (entry & IS_CARVING)
+                idx += 3;
+            else
+                idx++;
+        } else
+            idx += 3;
+    }*/
 }
 
 void DSTAggregate::FlattenDST(DSTBuildNode *node) {
@@ -1412,7 +1469,7 @@ DSTAggregate *DSTAggregate::Create(std::vector<Primitive> prims,
                                    DSTBuildNode *rootNode) {
     //Takes the parameters string and parses it into the necessary parameters for the constructor
     BVHAggregate bvh = *BVHAggregate::Create(prims, parameters);
-    return new DSTAggregate(std::move(prims), bvh.getNodes(), rootNode);
+    return new DSTAggregate(std::move(bvh.primitives), bvh.getNodes(), rootNode);
 }
 
 Bounds3f DSTAggregate::Bounds() const {
@@ -1423,6 +1480,7 @@ pstd::optional<ShapeIntersection> DSTAggregate::Intersect(const Ray &ray,
                                                           Float globalTMax) const {
     dstRays++;
     dstRays1++;
+    float delta = 0.001;
     pstd::optional<ShapeIntersection> si;
     // For code documentation look at DST supplemental materials Listing 7. DST Traversal Kernel
     float tMin = 0;
@@ -1471,19 +1529,18 @@ pstd::optional<ShapeIntersection> DSTAggregate::Intersect(const Ray &ray,
             if (tMax >= ts2) {
                 float tNext = std::max(tMin, ts2);
                 if (tMin <= ts1) {
-                    // stack.stack[] instead of stack[] in documentation??
-                    stack[++stackPtr] = StackItem(idx + (sign ^ diff), tNext, tMax);
+                    stack[++stackPtr] = StackItem(idx + (sign ^ diff), tNext - delta, tMax + delta);
                     idx += sign;
-                    tMax = std::min(tMax, ts1);
+                    tMax = std::min(tMax, ts1) + delta;
                 } else {
-                    idx += sign;
-                    tMin = tNext;
+                    idx += sign ^ diff;
+                    tMin = tNext - delta;
                 }
                 continue;
             } else {
                 if (tMin <= ts1) {
                     idx += sign;
-                    tMax = std::min(tMax, ts1);
+                    tMax = std::min(tMax, ts1) + delta;
                     continue;
                 } else {
                     goto pop;
@@ -1496,16 +1553,19 @@ pstd::optional<ShapeIntersection> DSTAggregate::Intersect(const Ray &ray,
             uint32_t temp2 = linearDST[idx + 2];
             carvePlanes[1] = *reinterpret_cast<float*>(&temp2);
 
-            char carveType1 = header5 >> 2 & 3;
+            char carveType1 = (header5 >> 2) & 3;
             char carveType2 = header5 & 3;
 
             if (carveType1 == 2) {
                 unsigned sign = dirSgn[carveType2];
-                float ts1 = (carvePlanes[sign] - ray.o[carveType2]) * invDir[carveType2];
-                float ts2 =
-                    (carvePlanes[sign ^ 1] - ray.o[carveType2]) * invDir[carveType2];
-                tMax = std::min(ts1, tMax);
-                tMin = std::max(ts2, tMin);
+                if (carvePlanes[sign] != 0) {
+                    float ts1 = (carvePlanes[sign] - ray.o[carveType2]) * invDir[carveType2];
+                    tMax = std::min(ts1, tMax);
+                }
+                if (carvePlanes[sign ^ 1] != 0) {
+                    float ts2 = (carvePlanes[sign ^ 1] - ray.o[carveType2]) * invDir[carveType2];
+                    tMin = std::max(ts2, tMin) -delta;
+                }
                 dstPlaneIntersections++;
                 if (tMin > tMax)
                     goto pop;
@@ -1535,8 +1595,8 @@ pstd::optional<ShapeIntersection> DSTAggregate::Intersect(const Ray &ray,
                     tMin1 = tMin;
                 }
 
-                tMin = std::max(tMin, std::max(tMin0, tMin1));
-                tMax = std::min(tMax, std::min(tMax0, tMax1));
+                tMin = std::max(tMin, std::max(tMin0, tMin1)) - delta;
+                tMax = std::min(tMax, std::min(tMax0, tMax1)) + delta;
                 dstPlaneIntersections++;
                 if (tMin > tMax)
                     goto pop;
@@ -1735,6 +1795,144 @@ bool DSTAggregate::IntersectP(const Ray &ray, Float globalTMax) const {
     return false;
 }
 
+void DSTAggregate::printDST(DSTBuildNode node, Bounds3f boundingBox, int depth) {
+    std::string out;
+    for (int i = 0; i < depth; i++)
+        out = out + "   ";
+    int header = (node.GetFlag() >> 27) & 15;
+    std::cout << out << boundingBox << '\n';
+    if (node.IsLeaf()) {
+        std::cout << out << "Leaf" << '\n';
+        for (unsigned i = node.GetFlag() & OFFSET;; i++) {
+            std::cout << out << "Primitive: " << i << "  " << primitives[i].Bounds().ToString() << '\n';
+            if (primitives[i].isLast()) {
+                break;
+            }
+        }
+        std::cout << '\n';
+    } else if (node.IsCarving()) {
+        if (header >> 2 == 2) {
+            if ((header & 3) == 0) {
+                if (node.plane2 != 0)
+                boundingBox.pMin.x = node.plane2;
+                if (node.plane1 != 0)
+                boundingBox.pMax.x = node.plane1;
+            } else if ((header & 3) == 1) {
+                if (node.plane2 != 0)
+                boundingBox.pMin.y = node.plane2;
+                if (node.plane1 != 0)
+                boundingBox.pMax.y = node.plane1;
+            } else if ((header & 3) == 2) {
+                if (node.plane2 != 0)
+                boundingBox.pMin.z = node.plane2;
+                if (node.plane1 != 0)
+                boundingBox.pMax.z = node.plane1;
+            }
+        } else if (header >> 2 == 0) { //xy
+            if ((header & 3) == 0) {
+                if (node.plane1 != 0)
+                boundingBox.pMax.x = node.plane1;
+                if (node.plane2 != 0)
+                boundingBox.pMax.y = node.plane2;
+            } else if ((header & 3) == 1) {
+                if (node.plane1 != 0)
+                boundingBox.pMax.x = node.plane1;
+                if (node.plane2 != 0)
+                boundingBox.pMin.y = node.plane2;
+            } else if ((header & 3) == 2) {
+                if (node.plane1 != 0)
+                boundingBox.pMin.x = node.plane1;
+                if (node.plane2 != 0)
+                boundingBox.pMax.y = node.plane2;
+            } else if ((header & 3) == 3) {
+                if (node.plane1 != 0)
+                boundingBox.pMin.x = node.plane1;
+                if (node.plane2 != 0)
+                boundingBox.pMin.y = node.plane2;
+            }
+        } else if (header >> 2 == 1) {  //xz
+            if ((header & 3) == 0) {
+                if (node.plane1 != 0)
+                boundingBox.pMax.x = node.plane1;
+                if (node.plane2 != 0)
+                boundingBox.pMax.z = node.plane2;
+            } else if ((header & 3) == 1) {
+                if (node.plane1 != 0)
+                boundingBox.pMax.x = node.plane1;
+                if (node.plane2 != 0)
+                boundingBox.pMin.z = node.plane2;
+            } else if ((header & 3) == 2) {
+                if (node.plane1 != 0)
+                boundingBox.pMin.x = node.plane1;
+                if (node.plane2 != 0)
+                boundingBox.pMax.z = node.plane2;
+            } else if ((header & 3) == 3) {
+                if (node.plane1 != 0)
+                boundingBox.pMin.x = node.plane1;
+                if (node.plane2 != 0)
+                boundingBox.pMin.z = node.plane2;
+            }
+        } else if (header >> 2 == 3) {  //yz
+            if ((header & 3) == 0) {
+                if (node.plane1 != 0)
+                boundingBox.pMax.y = node.plane1;
+                if (node.plane2 != 0)
+                boundingBox.pMax.z = node.plane2;
+            } else if ((header & 3) == 1) {
+                if (node.plane1 != 0)
+                boundingBox.pMax.y = node.plane1;
+                if (node.plane2 != 0)
+                boundingBox.pMin.z = node.plane2;
+            } else if ((header & 3) == 2) {
+                if (node.plane1 != 0)
+                boundingBox.pMin.y = node.plane1;
+                if (node.plane2 != 0)
+                boundingBox.pMax.z = node.plane2;
+            } else if ((header & 3) == 3) {
+                if (node.plane1 != 0)
+                boundingBox.pMin.y = node.plane1;
+                if (node.plane2 != 0)
+                boundingBox.pMin.z = node.plane2;
+            }
+        }
+        if (node.isCarvingLeaf()) {
+            if (((node.GetFlag() >> 29) & 3) == 2) {
+                std::cout << out << "Single-Axis Carving Leaf with carved Bounding box: " << boundingBox.ToString() << '\n';
+            } else {
+                std::cout << out << "Dual-Axis Carving Leaf with carved Bounding box: " << boundingBox.ToString() << '\n';
+            }
+            for (unsigned i = node.GetFlag() & OFFSET;; i++) {
+                std::cout << out << "Primitive: " << i << "  " << primitives[i].Bounds().ToString() << '\n';
+                if (primitives[i].isLast()) {
+                    break;
+                }
+            }
+        } else {
+            if (((node.GetFlag() >> 29) & 3) == 2)
+                std::cout << out << "Single-Axis Carving Node" << '\n';
+            else 
+                std::cout << out << "Dual-Axis Carving Node" << '\n';
+            printDST(*node.children[0], boundingBox, depth + 1);
+        }
+    } else {
+        std::cout << out << "Splitting Node" << '\n';
+        Bounds3f boundingBox1(boundingBox);
+        Bounds3f boundingBox2(boundingBox);
+        if (header >> 2 == 0) {
+            boundingBox1.pMax.x = node.plane1;
+            boundingBox2.pMin.x = node.plane2;
+        } else if (header >> 2 == 1) {
+            boundingBox1.pMax.y = node.plane1;
+            boundingBox2.pMin.y = node.plane2;
+        } else if (header >> 2 == 2) {
+            boundingBox1.pMax.z = node.plane1;
+            boundingBox2.pMin.z = node.plane2;
+        }
+        printDST(*node.children[0], boundingBox1, depth + 1);
+        printDST(*node.children[1], boundingBox2, depth + 1);
+    }
+}
+
 DSTBuildNode *DSTAggregate::BuildRecursiveFromBVH(ThreadLocal<Allocator> &threadAllocators,
                                              LinearBVHNode* nodes,
                                              int currentNodeIndex, int currentDepth) {
@@ -1744,6 +1942,8 @@ DSTBuildNode *DSTAggregate::BuildRecursiveFromBVH(ThreadLocal<Allocator> &thread
     LinearBVHNode parentNodeBVH = nodes[currentNodeIndex];
     LinearBVHNode leftChildNodeBVH = nodes[currentNodeIndex + 1];
     LinearBVHNode rightChildNodeBVH = nodes[parentNodeBVH.secondChildOffset];
+    int indexToLeftBVHChild = currentNodeIndex + 1;
+    int IndexToRightBVHChild = parentNodeBVH.secondChildOffset;
 
     if (parentNodeBVH.nPrimitives > 0) {
         node->InitLeaf(parentNodeBVH.primitivesOffset, currentDepth, parentNodeBVH.nPrimitives);
@@ -1761,7 +1961,9 @@ DSTBuildNode *DSTAggregate::BuildRecursiveFromBVH(ThreadLocal<Allocator> &thread
     std::vector<Bounds3f> bestNodesBB(6);
     float bestSAH = FLT_MAX;
     Bounds3f parentBounds = parentNodeBVH.bounds;
+    bool switchChildren = false;
     for (int i = 0; i <= 2; i++) {
+        bool switchChildrenLocal = false;
         std::vector<int> nodeComposition(13, 0);
         std::vector<float> nodesPlanes(14, 0.f);
         std::vector<Bounds3f> nodesBB(7);
@@ -1777,30 +1979,29 @@ DSTBuildNode *DSTAggregate::BuildRecursiveFromBVH(ThreadLocal<Allocator> &thread
                 nodesPlanes[12] = leftChildNodeBVH.bounds.pMax.x;
                 nodesPlanes[13] = rightChildNodeBVH.bounds.pMin.x;
             } else {
-                leftChildBounds.pMin.x = leftChildNodeBVH.bounds.pMin.x;
-                rightChildBounds.pMax.x = rightChildNodeBVH.bounds.pMax.x;
-                nodesPlanes[12] = leftChildNodeBVH.bounds.pMin.x;
-                nodesPlanes[13] = rightChildNodeBVH.bounds.pMax.x;
+                switchChildrenLocal = true;
+                leftChildBounds.pMax.x = rightChildNodeBVH.bounds.pMax.x;
+                rightChildBounds.pMin.x = leftChildNodeBVH.bounds.pMin.x;
+                nodesPlanes[12] = rightChildNodeBVH.bounds.pMax.x;
+                nodesPlanes[13] = leftChildNodeBVH.bounds.pMin.x;
             }
         } else if (i == 1) {
-            float leftCenterY =
-                (leftChildNodeBVH.bounds.pMin.y + leftChildNodeBVH.bounds.pMax.y) / 2;
-            float rightCenterY =
-                (rightChildNodeBVH.bounds.pMin.y + rightChildNodeBVH.bounds.pMax.y) / 2;
+            float leftCenterY = (leftChildNodeBVH.bounds.pMin.y + leftChildNodeBVH.bounds.pMax.y) / 2;
+            float rightCenterY = (rightChildNodeBVH.bounds.pMin.y + rightChildNodeBVH.bounds.pMax.y) / 2;
             if (leftCenterY < rightCenterY) {
                 leftChildBounds.pMax.y = leftChildNodeBVH.bounds.pMax.y;
                 rightChildBounds.pMin.y = rightChildNodeBVH.bounds.pMin.y;
                 nodesPlanes[12] = leftChildNodeBVH.bounds.pMax.y;
                 nodesPlanes[13] = rightChildNodeBVH.bounds.pMin.y;
             } else {
-                leftChildBounds.pMin.y = leftChildNodeBVH.bounds.pMin.y;
-                rightChildBounds.pMax.y = rightChildNodeBVH.bounds.pMax.y;
-                nodesPlanes[12] = leftChildNodeBVH.bounds.pMin.y;
-                nodesPlanes[13] = rightChildNodeBVH.bounds.pMax.y;
+                switchChildrenLocal = true;
+                leftChildBounds.pMax.y = rightChildNodeBVH.bounds.pMax.y;
+                rightChildBounds.pMin.y = leftChildNodeBVH.bounds.pMin.y;
+                nodesPlanes[12] = rightChildNodeBVH.bounds.pMax.y;
+                nodesPlanes[13] = leftChildNodeBVH.bounds.pMin.y;
             }
         } else {
-            float leftCenterZ =
-                (leftChildNodeBVH.bounds.pMin.z + leftChildNodeBVH.bounds.pMax.z) / 2;
+            float leftCenterZ = (leftChildNodeBVH.bounds.pMin.z + leftChildNodeBVH.bounds.pMax.z) / 2;
             float rightCenterZ =
                 (rightChildNodeBVH.bounds.pMin.z + rightChildNodeBVH.bounds.pMax.z) / 2;
             if (leftCenterZ < rightCenterZ) {
@@ -1809,18 +2010,24 @@ DSTBuildNode *DSTAggregate::BuildRecursiveFromBVH(ThreadLocal<Allocator> &thread
                 nodesPlanes[12] = leftChildNodeBVH.bounds.pMax.z;
                 nodesPlanes[13] = rightChildNodeBVH.bounds.pMin.z;
             } else {
-                leftChildBounds.pMin.z = leftChildNodeBVH.bounds.pMin.z;
-                rightChildBounds.pMax.z = rightChildNodeBVH.bounds.pMax.z;
-                nodesPlanes[12] = leftChildNodeBVH.bounds.pMin.z;
-                nodesPlanes[13] = rightChildNodeBVH.bounds.pMax.z;
+                switchChildrenLocal = true;
+                leftChildBounds.pMax.z = rightChildNodeBVH.bounds.pMax.z;
+                rightChildBounds.pMin.z = leftChildNodeBVH.bounds.pMin.z;
+                nodesPlanes[12] = rightChildNodeBVH.bounds.pMin.z;
+                nodesPlanes[13] = leftChildNodeBVH.bounds.pMax.z;
             }
         }
         nodesBB[0] = leftChildBounds;
         nodesBB[1] = rightChildBounds;
-        float sumSAH =
-            determineSAH(nodeComposition, nodesPlanes, nodesBB, leftChildBounds, leftChildNodeBVH.bounds, 0, parentBounds.SurfaceArea()) +
-            determineSAH(nodeComposition, nodesPlanes, nodesBB, rightChildBounds, rightChildNodeBVH.bounds, 6, parentBounds.SurfaceArea());
+        float sumSAH;
+        if (switchChildrenLocal)
+            sumSAH = determineSAH(nodeComposition, nodesPlanes, nodesBB, leftChildBounds, rightChildNodeBVH.bounds, 0, parentBounds.SurfaceArea()) +
+            determineSAH(nodeComposition, nodesPlanes, nodesBB, rightChildBounds, leftChildNodeBVH.bounds, 6, parentBounds.SurfaceArea());
+        else
+            sumSAH = determineSAH(nodeComposition, nodesPlanes, nodesBB, leftChildBounds, leftChildNodeBVH.bounds, 0, parentBounds.SurfaceArea()) +
+                determineSAH(nodeComposition, nodesPlanes, nodesBB, rightChildBounds, rightChildNodeBVH.bounds, 6, parentBounds.SurfaceArea());
         if (sumSAH < bestSAH) {
+            switchChildren = switchChildrenLocal;
             bestNodeComposition = nodeComposition;
             bestNodesPlanes = nodesPlanes;
             bestNodesBB = nodesBB;
@@ -1828,6 +2035,15 @@ DSTBuildNode *DSTAggregate::BuildRecursiveFromBVH(ThreadLocal<Allocator> &thread
         }
     }
     dstOverallSAHCost += bestSAH;
+
+    if (switchChildren) {
+        LinearBVHNode temp = leftChildNodeBVH;
+        leftChildNodeBVH = rightChildNodeBVH;
+        rightChildNodeBVH = temp;
+        int tempI = indexToLeftBVHChild;
+        indexToLeftBVHChild = IndexToRightBVHChild;
+        IndexToRightBVHChild = tempI;
+    }
 
     bool lastLeftChildIsLeaf = leftChildNodeBVH.nPrimitives;
     bool lastRightChildIsLeaf = rightChildNodeBVH.nPrimitives;
@@ -1841,7 +2057,7 @@ DSTBuildNode *DSTAggregate::BuildRecursiveFromBVH(ThreadLocal<Allocator> &thread
         setSize++;
         DSTBuildNode *nextNode = alloc.new_object<DSTBuildNode>();
         depthLevel++;
-        if (bestNodeComposition[nextCarvingNode] == 1) {
+        if (bestNodeComposition[nextCarvingNode] == 3) {
             if (bestNodeComposition[nextCarvingNode + 2]) {
                 nextNodeP1->InitSingleAxisCarving(
                     bestNodeComposition[nextCarvingNode + 1], nextNode, 0, 0, depthLevel,
@@ -1856,15 +2072,17 @@ DSTBuildNode *DSTAggregate::BuildRecursiveFromBVH(ThreadLocal<Allocator> &thread
                     bestNodesBB[nextCarvingNode / 2], leftChildNodeBVH.nPrimitives);
             }
         } else {
+            int planeAxesAndCornerType = (bestNodeComposition[nextCarvingNode] - 1) << 2 |
+                                         bestNodeComposition[nextCarvingNode + 1];
             if (bestNodeComposition[nextCarvingNode + 2]) {
                 nextNodeP1->InitDoubleAxisCarving(
-                    bestNodeComposition[nextCarvingNode + 1], nextNode, 0, 0, depthLevel,
+                    planeAxesAndCornerType, nextNode, 0, 0, depthLevel,
                     bestNodesPlanes[nextCarvingNode],
                     bestNodesPlanes[nextCarvingNode + 1],
                     bestNodesBB[nextCarvingNode / 2], leftChildNodeBVH.nPrimitives);
             } else {
                 nextNodeP1->InitDoubleAxisCarving(
-                    bestNodeComposition[nextCarvingNode + 1], nextNode,
+                    planeAxesAndCornerType, nextNode,
                     lastLeftChildIsLeaf, leftChildNodeBVH.primitivesOffset, depthLevel,
                     bestNodesPlanes[nextCarvingNode],
                     bestNodesPlanes[nextCarvingNode + 1],
@@ -1881,9 +2099,9 @@ DSTBuildNode *DSTAggregate::BuildRecursiveFromBVH(ThreadLocal<Allocator> &thread
     if (depthLevel + 1 > maximumDepth)
         maximumDepth = currentDepth + 1;
     if (nextCarvingNode == 0)
-        leftChildNode = BuildRecursiveFromBVH(threadAllocators, nodes, currentNodeIndex + 1, depthLevel + 1);
+        leftChildNode = BuildRecursiveFromBVH(threadAllocators, nodes, indexToLeftBVHChild, depthLevel + 1);
     else  if (!lastLeftChildIsLeaf)
-        *nextNodeP1 = *BuildRecursiveFromBVH(threadAllocators, nodes, currentNodeIndex + 1, depthLevel +1);
+        *nextNodeP1 = *BuildRecursiveFromBVH(threadAllocators, nodes, indexToLeftBVHChild, depthLevel + 1);
     if (setSize == 0) {
         dstSetsWithZero++;
     } else if (setSize == 1) {
@@ -1903,40 +2121,42 @@ DSTBuildNode *DSTAggregate::BuildRecursiveFromBVH(ThreadLocal<Allocator> &thread
         setSize++;
         DSTBuildNode *nextNode = alloc.new_object<DSTBuildNode>();
         depthLevel++;
-        if (bestNodeComposition[nextCarvingNode] == 1) {
+        if (bestNodeComposition[nextCarvingNode] == 3) {
             if (bestNodeComposition[nextCarvingNode + 2]) {
                 nextNodeP2->InitSingleAxisCarving(
                     bestNodeComposition[nextCarvingNode + 1], nextNode, 0, 0, depthLevel,
                     bestNodesPlanes[nextCarvingNode],
                     bestNodesPlanes[nextCarvingNode + 1],
-                    bestNodesBB[nextCarvingNode / 2], leftChildNodeBVH.nPrimitives);
+                    bestNodesBB[nextCarvingNode / 2], rightChildNodeBVH.nPrimitives);
             } else {
                 nextNodeP2->InitSingleAxisCarving(
                     bestNodeComposition[nextCarvingNode + 1], nextNode,
                     lastRightChildIsLeaf, rightChildNodeBVH.primitivesOffset, depthLevel,
                     bestNodesPlanes[nextCarvingNode],
                     bestNodesPlanes[nextCarvingNode + 1],
-                    bestNodesBB[nextCarvingNode / 2], leftChildNodeBVH.nPrimitives);
+                    bestNodesBB[nextCarvingNode / 2], rightChildNodeBVH.nPrimitives);
             }
         } else {
+            int planeAxesAndCornerType = (bestNodeComposition[nextCarvingNode] - 1) << 2 |
+                                         bestNodeComposition[nextCarvingNode + 1];
             if (bestNodeComposition[nextCarvingNode + 2]) {
                 nextNodeP2->InitDoubleAxisCarving(
-                    bestNodeComposition[nextCarvingNode + 1], nextNode, 0, 0, depthLevel,
+                    planeAxesAndCornerType, nextNode, 0, 0, depthLevel,
                     bestNodesPlanes[nextCarvingNode],
                     bestNodesPlanes[nextCarvingNode + 1],
-                    bestNodesBB[nextCarvingNode / 2], leftChildNodeBVH.nPrimitives);
+                    bestNodesBB[nextCarvingNode / 2], rightChildNodeBVH.nPrimitives);
             } else {
                 nextNodeP2->InitDoubleAxisCarving(
-                    bestNodeComposition[nextCarvingNode + 1], nextNode,
+                    planeAxesAndCornerType, nextNode,
                     lastRightChildIsLeaf, rightChildNodeBVH.primitivesOffset, depthLevel,
                     bestNodesPlanes[nextCarvingNode],
                     bestNodesPlanes[nextCarvingNode + 1],
-                    bestNodesBB[nextCarvingNode / 2], leftChildNodeBVH.nPrimitives);
+                    bestNodesBB[nextCarvingNode / 2], rightChildNodeBVH.nPrimitives);
             }
         }
         if (nextCarvingNode == 6)
             rightChildNode = nextNodeP2;
-        nextNodeP2 = nextNode;
+        nextNodeP2 = nextNode; 
         nextCarvingNode = nextCarvingNode + 2;
     }
     if (lastRightChildIsLeaf)
@@ -1945,9 +2165,9 @@ DSTBuildNode *DSTAggregate::BuildRecursiveFromBVH(ThreadLocal<Allocator> &thread
         maximumDepth = currentDepth + 1;
     if (nextCarvingNode == 6)
         rightChildNode = BuildRecursiveFromBVH(
-            threadAllocators, nodes, parentNodeBVH.secondChildOffset, depthLevel + 1);
+            threadAllocators, nodes, IndexToRightBVHChild, depthLevel + 1);
     else if (!lastRightChildIsLeaf)
-        *nextNodeP2 = *BuildRecursiveFromBVH(threadAllocators, nodes, parentNodeBVH.secondChildOffset, depthLevel + 1);
+        *nextNodeP2 = *BuildRecursiveFromBVH(threadAllocators, nodes, IndexToRightBVHChild, depthLevel + 1);
     if (setSize == 0) {
         dstSetsWithZero++;
     } else if (setSize == 1) {
@@ -1967,17 +2187,19 @@ DSTBuildNode *DSTAggregate::BuildRecursiveFromBVH(ThreadLocal<Allocator> &thread
 float determineSAH(std::vector<int> &nodeComposition, std::vector<float> &nodesPlanes, std::vector<Bounds3f> &nodesBB, Bounds3f parentBB,
                    Bounds3f childBB, int positionOfNextNode, float S) {
     std::vector<int> sidesToCarve;
-    if (parentBB.pMin.x < childBB.pMin.x)
+    float delta = 0.0001;
+    //sides to carve must be ordered first by x,y,z and then by min, max
+    if (parentBB.pMin.x + delta < childBB.pMin.x)
         sidesToCarve.push_back(1);
-    if (parentBB.pMin.y < childBB.pMin.y)
-        sidesToCarve.push_back(2);
-    if (parentBB.pMin.z < childBB.pMin.z)
-        sidesToCarve.push_back(3);
-    if (parentBB.pMax.x > childBB.pMax.x)
+    if (parentBB.pMax.x > childBB.pMax.x + delta)
         sidesToCarve.push_back(4);
-    if (parentBB.pMax.y > childBB.pMax.y)
+    if (parentBB.pMin.y + delta < childBB.pMin.y)
+        sidesToCarve.push_back(2);
+    if (parentBB.pMax.y > childBB.pMax.y + delta)
         sidesToCarve.push_back(5);
-    if (parentBB.pMax.z > childBB.pMax.z)
+    if (parentBB.pMin.z + delta < childBB.pMin.z)
+        sidesToCarve.push_back(3);
+    if (parentBB.pMax.z > childBB.pMax.z + delta)
         sidesToCarve.push_back(6);
     float SAH = 0;
     if (sidesToCarve.size() >= 5) {
@@ -1990,7 +2212,7 @@ float determineSAH(std::vector<int> &nodeComposition, std::vector<float> &nodesP
                                     nodesPlanes, nodesBB, positionOfNextNode, S,
                                     parentBB.SurfaceArea(), parentBB, childBB);
     } else if (sidesToCarve.size() >= 1) {
-        carveOneOrTwoSides(sidesToCarve, nodeComposition, nodesPlanes, positionOfNextNode,
+        SAH = carveOneOrTwoSides(sidesToCarve, nodeComposition, nodesPlanes, positionOfNextNode,
                            S, parentBB.SurfaceArea(), parentBB, childBB);
     }
     return SAH;
@@ -2016,12 +2238,28 @@ float carveOneOrTwoSides(std::vector<int> sidesToCarve, std::vector<int> &nodeCo
 
     //Only one side must be carved -> I choose a single axis carving node
     if (secondSideToCarve == 0 || secondSideToCarve - firstSideToCarve == 3) {
-        nodeComposition[positionOfNextNode] = 1;
-        nodeComposition[positionOfNextNode + 1] = firstSideToCarve - 1;
+        nodeComposition[positionOfNextNode] = 3; //set first node composition entry of a CN to its first nodeType +1 (so 0 can be dafault and ignored)
+        //second node composition entry can be 0 as its not checked for default value
+        if (firstSideToCarve < 4) {//carve min value
+            nodeComposition[positionOfNextNode + 1] = firstSideToCarve - 1;
+        } else {//carve max value
+            //the first plane always carves min value, the second plane always max value
+            nodeComposition[positionOfNextNode + 1] = firstSideToCarve - 4;
+            nodesPlanes[positionOfNextNode + 1] = nodesPlanes[positionOfNextNode];
+            nodesPlanes[positionOfNextNode] = NULL;
+        }
         return 0.3 * (Sn / S);
     }
-    nodeComposition[positionOfNextNode] = (firstSideToCarve + secondSideToCarve) % 3;
-    nodeComposition[positionOfNextNode + 1] = 2 * (firstSideToCarve > 2 || secondSideToCarve == 4) + (secondSideToCarve >= 5 && firstSideToCarve != 3);
+    if (firstSideToCarve % 3 == 1 && secondSideToCarve % 3 == 2) { //xy
+        nodeComposition[positionOfNextNode] = 1; // we want 0 but we set value +1 so default can be 0
+        nodeComposition[positionOfNextNode + 1] = 2 * (firstSideToCarve < 4) + (secondSideToCarve < 4);
+    } else if (firstSideToCarve % 3 == 1 && secondSideToCarve % 3 == 0) { //xz
+        nodeComposition[positionOfNextNode] = 2;
+        nodeComposition[positionOfNextNode + 1] = 2 * (firstSideToCarve < 4) + (secondSideToCarve < 4);
+    } else if (firstSideToCarve % 3 == 2 && secondSideToCarve % 3 == 0) { //yz
+        nodeComposition[positionOfNextNode] = 4; //3 is for single-axis CN therefore 4
+        nodeComposition[positionOfNextNode + 1] = 2 * (firstSideToCarve < 4) + (secondSideToCarve < 4);
+    }
     return 0.5 * (Sn / S);
 }
 
@@ -2053,7 +2291,7 @@ float carveThreeOrFourSides(const std::vector<int> sidesToCarve,
             float SnCarved = carvedBB.SurfaceArea();
 
             if (secondSideToCarve - firstSideToCarve == 3) { 
-                nodeCompositionCopy[positionOfNextNode] = 1;
+                nodeCompositionCopy[positionOfNextNode] = 3;
                 nodeCompositionCopy[positionOfNextNode + 1] = firstSideToCarve - 1;
                 float SAH = 0.3 * (Sn / S) +
                             carveOneOrTwoSides(sidesToCarveCopy, nodeCompositionCopy,
@@ -2066,8 +2304,16 @@ float carveThreeOrFourSides(const std::vector<int> sidesToCarve,
                     bestSAH = SAH;
                 }
             } else {
-                nodeCompositionCopy[positionOfNextNode] = (firstSideToCarve + secondSideToCarve) % 3;
-                nodeCompositionCopy[positionOfNextNode + 1] = 2 * (firstSideToCarve > 2 || secondSideToCarve == 4) + (secondSideToCarve >= 5 && firstSideToCarve != 3);
+                if (firstSideToCarve % 3 == 1 && secondSideToCarve % 3 == 2) {  // xy
+                    nodeCompositionCopy[positionOfNextNode] = 1;
+                    nodeCompositionCopy[positionOfNextNode + 1] = 2 * (firstSideToCarve < 4) + (secondSideToCarve < 4);
+                } else if (firstSideToCarve % 3 == 1 && secondSideToCarve % 3 == 0) {  // xz
+                    nodeCompositionCopy[positionOfNextNode] = 2;
+                    nodeCompositionCopy[positionOfNextNode + 1] = 2 * (firstSideToCarve < 4) + (secondSideToCarve < 4);
+                } else if (firstSideToCarve % 3 == 2 && secondSideToCarve % 3 == 0) {  // yz
+                    nodeCompositionCopy[positionOfNextNode] = 4;
+                    nodeCompositionCopy[positionOfNextNode + 1] = 2 * (firstSideToCarve < 4) + (secondSideToCarve < 4);
+                }
                 float SAH = 0.5 * (Sn / S) +
                             carveOneOrTwoSides(sidesToCarveCopy, nodeCompositionCopy,
                                                nodesPlanesCopy, positionOfNextNode + 2, S,
@@ -2115,7 +2361,7 @@ float carveFiveSides(const std::vector<int> sidesToCarve,
             float SnCarved = carvedBB.SurfaceArea();
 
             if (secondSideToCarve - firstSideToCarve == 3) {
-                nodeCompositionCopy[positionOfNextNode] = 1;
+                nodeCompositionCopy[positionOfNextNode] = 3;
                 nodeCompositionCopy[positionOfNextNode + 1] = firstSideToCarve - 1;
                 float SAH = 0.3 * (Sn / S) +
                             carveThreeOrFourSides(sidesToCarveCopy, nodeCompositionCopy,
@@ -2128,8 +2374,16 @@ float carveFiveSides(const std::vector<int> sidesToCarve,
                     bestSAH = SAH;
                 }
             } else {
-                nodeCompositionCopy[positionOfNextNode] = (firstSideToCarve + secondSideToCarve) % 3;
-                nodeCompositionCopy[positionOfNextNode + 1] = 2 * (firstSideToCarve > 2 || secondSideToCarve == 4) + (secondSideToCarve >= 5 && firstSideToCarve != 3);
+                if (firstSideToCarve % 3 == 1 && secondSideToCarve % 3 == 2) {  // xy
+                    nodeCompositionCopy[positionOfNextNode] = 1;
+                    nodeCompositionCopy[positionOfNextNode + 1] = 2 * (firstSideToCarve < 4) + (secondSideToCarve < 4);
+                } else if (firstSideToCarve % 3 == 1 && secondSideToCarve % 3 == 0) {  // xz
+                    nodeCompositionCopy[positionOfNextNode] = 2;
+                    nodeCompositionCopy[positionOfNextNode + 1] = 2 * (firstSideToCarve < 4) + (secondSideToCarve < 4);
+                } else if (firstSideToCarve % 3 == 2 && secondSideToCarve % 3 == 0) {  // yz
+                    nodeCompositionCopy[positionOfNextNode] = 4;
+                    nodeCompositionCopy[positionOfNextNode + 1] = 2 * (firstSideToCarve < 4) + (secondSideToCarve < 4);
+                }
                 float SAH = 0.5 * (Sn / S) +
                             carveThreeOrFourSides(sidesToCarveCopy, nodeCompositionCopy,
                                                   nodesPlanesCopy, nodesBBCopy,
@@ -2159,19 +2413,19 @@ Bounds3f carve(Bounds3f parentBB, Bounds3f childBB, std::vector<int> sidesToCarv
             planes[i] = childBB.pMin.x;
         } else if (sideToCarve == 2) {
             carvedBB.pMin.y = childBB.pMin.y;
-            planes[i] = childBB.pMin.x;
+            planes[i] = childBB.pMin.y;
         } else if (sideToCarve == 3) {
             carvedBB.pMin.z = childBB.pMin.z;
-            planes[i] = childBB.pMin.x;
+            planes[i] = childBB.pMin.z;
         } else if (sideToCarve == 4) {
-            carvedBB.pMax.x = childBB.pMin.x;
-            planes[i] = childBB.pMin.x;
+            carvedBB.pMax.x = childBB.pMax.x;
+            planes[i] = childBB.pMax.x;
         } else if (sideToCarve == 5) {
             carvedBB.pMax.y = childBB.pMax.y;
-            planes[i] = childBB.pMin.x;
+            planes[i] = childBB.pMax.y;
         } else if (sideToCarve == 6) {
             carvedBB.pMax.z = childBB.pMax.z;
-            planes[i] = childBB.pMin.x;
+            planes[i] = childBB.pMax.z;
         }
         i++;
     }
@@ -2316,10 +2570,10 @@ WDSTAggregate *WDSTAggregate::Create(std::vector<Primitive> prims,
                                      const ParameterDictionary &parameters) {
     pstd::pmr::monotonic_buffer_resource resource;
     Allocator alloc(&resource);
-    DSTBuildNode *node = alloc.new_object<DSTBuildNode>();
-    DSTAggregate dst = *DSTAggregate::Create(prims, parameters, node); // TODO: Überlegen, wie ich am elegantesten an die root BuildNode rankomme
-    Bounds3f globalBB = dst.globalBB;
-    return new WDSTAggregate(std::move(prims), *node, globalBB);
+    //DSTBuildNode *node = DSTAggregate::CreateForWDST(prims, parameters);  // TODO: Überlegen, wie ich am elegantesten an die root BuildNode rankomme
+    //Bounds3f globalBB = node->GetBB();
+    //return new WDSTAggregate(std::move(prims), *node, globalBB);
+    return NULL;
 }
 
 Bounds3f WDSTAggregate::Bounds() const {
@@ -3426,38 +3680,6 @@ void WDSTAggregate::addNodeToDepthList(WDSTBuildNode *node) {
     for (WDSTBuildNode *child : node->children) {
         if (child != NULL)
             addNodeToDepthList(child);
-    }
-}
-
-void printBVH(BVHBuildNode node, int depth) {
-    std::string out;
-    for (int i = 0; i < depth; i++)
-        out = out + " ";
-    if (node.nPrimitives) {
-        std::cout << out << node.nPrimitives << '\n';
-    } else {
-        std::cout << out << "n" << '\n';
-        for (const auto &child : node.children)
-            printBVH(*child, depth + 1);
-    }
-}
-
-void printDST(DSTBuildNode node, int depth) {
-    std::string out;
-    for (int i = 0; i < depth; i++)
-        out = out + " ";
-    if (node.IsLeaf()) {
-        std::cout << out << "l" << '\n';
-    } else if (node.isCarvingLeaf()){
-        std::cout << out << "cl" << '\n';
-    }
-    else {
-        if (node.IsCarving()) 
-            std::cout << out << "cn" << '\n';
-        else 
-            std::cout << out << "sn" << '\n';
-        for (const auto &child : node.children)
-            printDST(*child, depth + 1);
     }
 }
 }  // namespace pbrt
