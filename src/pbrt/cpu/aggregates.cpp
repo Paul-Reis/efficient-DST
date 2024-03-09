@@ -1243,7 +1243,7 @@ Primitive CreateAccelerator(const std::string &name, std::vector<Primitive> prim
     } else if (name == "kdtree")
         accel = KdTreeAggregate::Create(std::move(prims), parameters);
     else if (name == "dst") {
-        accel = DSTAggregate::Create(std::move(prims), parameters, NULL);
+        accel = DSTAggregate::Create(std::move(prims), parameters);
         testForDst += 10;
         //std::cout << "Dual-Split Tree" << '\n';
     } else if (name == "wdst") {
@@ -1374,8 +1374,9 @@ struct DSTBuildNode {
         int nTriangles = 0;
 };
 
-DSTAggregate::DSTAggregate(std::vector<Primitive> prims, LinearBVHNode *BVHNodes,
-                           DSTBuildNode *rootNode)
+std::vector<DSTBuildNode> gloabalDSTNodes;
+
+DSTAggregate::DSTAggregate(std::vector<Primitive> prims, LinearBVHNode *BVHNodes)
     : primitives(std::move(prims)) {
     CHECK(!primitives.empty());
 
@@ -1393,6 +1394,7 @@ DSTAggregate::DSTAggregate(std::vector<Primitive> prims, LinearBVHNode *BVHNodes
 
     globalBB = BVHNodes[0].bounds;
     root = BuildRecursiveFromBVH(threadAllocators, BVHNodes, 0, 0);
+    numberOfDSTNodes = 0;
     
     nodesPerDepthLevel.resize(maximumDepth + 1);
     addNodeToDepthList(root);
@@ -1406,6 +1408,7 @@ DSTAggregate::DSTAggregate(std::vector<Primitive> prims, LinearBVHNode *BVHNodes
                 offset = offset + 3;
             }
             dstNumberOfNodes++;
+            numberOfDSTNodes++;
             nodesPerDepthLevel[i].pop_front();
         }
     }
@@ -1421,6 +1424,9 @@ DSTAggregate::DSTAggregate(std::vector<Primitive> prims, LinearBVHNode *BVHNodes
     linearDST.resize(offset);
     FlattenDST(root);
 
+    buildNodes.resize(numberOfDSTNodes);
+    addBuildNode(*root, 0);
+    gloabalDSTNodes = buildNodes;
     /*
     std::cout << '\n' << "Primitive in liear Tree:" << '\n';
     int idx = 0;
@@ -1464,12 +1470,22 @@ void DSTAggregate::FlattenDST(DSTBuildNode *node) {
     }
 }
 
+int DSTAggregate::addBuildNode(DSTBuildNode node, int index) {
+    buildNodes[index] = node;
+    if (node.IsSplitting()) {
+        index = addBuildNode(*node.children[0], index + 1);
+        index = addBuildNode(*node.children[1], index + 1);
+    } else if (node.IsCarving() && !node.isCarvingLeaf()) {
+        index = addBuildNode(*node.children[0], index + 1);
+    }
+    return index;
+}
+
 DSTAggregate *DSTAggregate::Create(std::vector<Primitive> prims,
-                                   const ParameterDictionary &parameters,
-                                   DSTBuildNode *rootNode) {
+                                   const ParameterDictionary &parameters) {
     //Takes the parameters string and parses it into the necessary parameters for the constructor
     BVHAggregate bvh = *BVHAggregate::Create(prims, parameters);
-    return new DSTAggregate(std::move(bvh.primitives), bvh.getNodes(), rootNode);
+    return new DSTAggregate(std::move(bvh.primitives), bvh.getNodes());
 }
 
 Bounds3f DSTAggregate::Bounds() const {
@@ -1526,21 +1542,21 @@ pstd::optional<ShapeIntersection> DSTAggregate::Intersect(const Ray &ray,
 
             sign *= diff;
             dstPlaneIntersections += 2;
-            if (tMax >= ts2) {
+            if (tMax + delta >= ts2) {
                 float tNext = std::max(tMin, ts2);
-                if (tMin <= ts1) {
-                    stack[++stackPtr] = StackItem(idx + (sign ^ diff), tNext - delta, tMax + delta);
+                if (tMin <= ts1 + delta) {
+                    stack[++stackPtr] = StackItem(idx + (sign ^ diff), tNext, tMax);
                     idx += sign;
-                    tMax = std::min(tMax, ts1) + delta;
+                    tMax = std::min(tMax, ts1);
                 } else {
                     idx += sign ^ diff;
-                    tMin = tNext - delta;
+                    tMin = tNext;
                 }
                 continue;
             } else {
-                if (tMin <= ts1) {
+                if (tMin <= ts1 + delta) {
                     idx += sign;
-                    tMax = std::min(tMax, ts1) + delta;
+                    tMax = std::min(tMax, ts1);
                     continue;
                 } else {
                     goto pop;
@@ -1564,10 +1580,10 @@ pstd::optional<ShapeIntersection> DSTAggregate::Intersect(const Ray &ray,
                 }
                 if (carvePlanes[sign ^ 1] != 0) {
                     float ts2 = (carvePlanes[sign ^ 1] - ray.o[carveType2]) * invDir[carveType2];
-                    tMin = std::max(ts2, tMin) -delta;
+                    tMin = std::max(ts2, tMin);
                 }
                 dstPlaneIntersections++;
-                if (tMin > tMax)
+                if (tMin > tMax + delta)
                     goto pop;
                 int offset = headerOffset & OFFSET;
 
@@ -1595,10 +1611,10 @@ pstd::optional<ShapeIntersection> DSTAggregate::Intersect(const Ray &ray,
                     tMin1 = tMin;
                 }
 
-                tMin = std::max(tMin, std::max(tMin0, tMin1)) - delta;
-                tMax = std::min(tMax, std::min(tMax0, tMax1)) + delta;
+                tMin = std::max(tMin, std::max(tMin0, tMin1));
+                tMax = std::min(tMax, std::min(tMax0, tMax1));
                 dstPlaneIntersections++;
-                if (tMin > tMax)
+                if (tMin > tMax + delta)
                     goto pop;
                 int offset = headerOffset & OFFSET;
                 if (leaf) {
@@ -1613,7 +1629,8 @@ pstd::optional<ShapeIntersection> DSTAggregate::Intersect(const Ray &ray,
     leaf:
         for (unsigned i = idx;; i++) {
             dstTriangleIntersections++;
-            pstd::optional<ShapeIntersection> primSi = primitives[i].Intersect(ray, tMax);
+            pstd::optional<ShapeIntersection> primSi =
+                primitives[i].Intersect(ray, tMax + delta);
             if (primSi.has_value()) {
                 si = primSi;
                 tMax = si->tHit;
@@ -2002,8 +2019,7 @@ DSTBuildNode *DSTAggregate::BuildRecursiveFromBVH(ThreadLocal<Allocator> &thread
             }
         } else {
             float leftCenterZ = (leftChildNodeBVH.bounds.pMin.z + leftChildNodeBVH.bounds.pMax.z) / 2;
-            float rightCenterZ =
-                (rightChildNodeBVH.bounds.pMin.z + rightChildNodeBVH.bounds.pMax.z) / 2;
+            float rightCenterZ = (rightChildNodeBVH.bounds.pMin.z + rightChildNodeBVH.bounds.pMax.z) / 2;
             if (leftCenterZ < rightCenterZ) {
                 leftChildBounds.pMax.z = leftChildNodeBVH.bounds.pMax.z;
                 rightChildBounds.pMin.z = rightChildNodeBVH.bounds.pMin.z;
@@ -2440,34 +2456,6 @@ void DSTAggregate::addNodeToDepthList(DSTBuildNode* node) {
     }
 }
 
-/*
-void DSTAggregate::printDSTStats() {
-    std::cout << '\n' << '\n' << '\n';
-    std::cout << "SAH cost:                                 " << overallSAHCost << '\n';
-    std::cout << "Number of Nodes:                          " << numberOfNodes << '\n';
-    int storageInByte =4 * (numberOfLeafs + numberOfCarvingNodes * 3 + numberOfSplittingNodes * 3);
-    std::cout << "Storage in Byte:                          " << storageInByte << '\n';
-    float sumPlaneIntersections = 0;
-    float sumTriangleIntersections = 0;
-    int rays = planeIntersectionsPerRay.size();
-    for (int i = 0; i < rays; i++) {
-        sumPlaneIntersections += planeIntersectionsPerRay.front();
-        planeIntersectionsPerRay.pop_front();
-        sumTriangleIntersections += triangleIntersectionsPerRay.front();
-        triangleIntersectionsPerRay.pop_front();
-    }
-    std::cout << "Average Triangle Intersections per Ray:   " << sumTriangleIntersections / rays << '\n';
-    std::cout << "Average Plane Intersections per Ray:      " << sumPlaneIntersections / rays << '\n' << '\n';
-    std::cout << "Number of Splitting Nodes:                " << numberOfSplittingNodes << '\n';
-    std::cout << "Number of Carving Nodes:                  " << numberOfCarvingNodes << '\n';
-    std::cout << "Number of Leafs:                          " << numberOfLeafs << '\n' << '\n';
-    std::cout << "Number of Carving Node Sets:              " << numberOfCarvingNodeSets << '\n';
-    std::cout << "Number of Sets size 0:                    " << setsWithZero << '\n';
-    std::cout << "Number of Sets size 1:                    " << setsWithOne << '\n';
-    std::cout << "Number of Sets size 2:                    " << setsWithTwo << '\n';
-    std::cout << "Number of Sets size 3:                    " << setsWithThree << '\n' << '\n' << '\n';
-}*/
-
 StackItem::StackItem(int idx, float tMin, float tMax) {
     this->idx = idx;
     this->tMax = tMax;
@@ -2570,10 +2558,13 @@ WDSTAggregate *WDSTAggregate::Create(std::vector<Primitive> prims,
                                      const ParameterDictionary &parameters) {
     pstd::pmr::monotonic_buffer_resource resource;
     Allocator alloc(&resource);
-    //DSTBuildNode *node = DSTAggregate::CreateForWDST(prims, parameters);  // TODO: Überlegen, wie ich am elegantesten an die root BuildNode rankomme
-    //Bounds3f globalBB = node->GetBB();
-    //return new WDSTAggregate(std::move(prims), *node, globalBB);
-    return NULL;
+    DSTAggregate dst = *DSTAggregate::Create(prims, parameters); // TODO: Überlegen, wie ich am elegantesten an die root BuildNode rankomme
+    Bounds3f globalBB = dst.globalBB;
+    std::vector<DSTBuildNode> DSTNodesBeforReconstruction = gloabalDSTNodes;
+    reconstructTree(0);
+    std::vector<DSTBuildNode> DSTNodesAfterReconstruction = gloabalDSTNodes;
+    DSTBuildNode node = gloabalDSTNodes[0];
+    return new WDSTAggregate(std::move(prims), node, globalBB);
 }
 
 Bounds3f WDSTAggregate::Bounds() const {
@@ -3294,7 +3285,22 @@ bool WDSTAggregate::IntersectP(const Ray &ray, Float globalTMax) const {
     return false;
 }
 
-WDSTBuildNode *WDSTAggregate::BuildWDSTRecursively(ThreadLocal<Allocator> &threadAllocators,
+int WDSTAggregate::reconstructTree(int index) {
+    int childIndex = index;
+    if (gloabalDSTNodes[index].IsSplitting()) {
+        (&gloabalDSTNodes[index])->children[0] = &gloabalDSTNodes[index + 1];
+        childIndex = reconstructTree(index + 1);
+        (&gloabalDSTNodes[index])->children[1] = &gloabalDSTNodes[childIndex + 1];
+        childIndex = reconstructTree(childIndex + 1);
+    } else if (gloabalDSTNodes[index].IsCarving() && !gloabalDSTNodes[index].isCarvingLeaf()) {
+        (&gloabalDSTNodes[index])->children[0] = &gloabalDSTNodes[index + 1];
+        childIndex = reconstructTree(index + 1);
+    }
+    return childIndex;
+}
+
+WDSTBuildNode *WDSTAggregate::BuildWDSTRecursively(
+    ThreadLocal<Allocator> &threadAllocators,
                                                  DSTBuildNode *splittingNode, float S, int currentDepth) {
     Allocator alloc = threadAllocators.Get();
     WDSTBuildNode *node = alloc.new_object<WDSTBuildNode>();

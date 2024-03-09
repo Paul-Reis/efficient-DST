@@ -118,10 +118,10 @@ struct DSTBuildNode;
 class DSTAggregate {
   public:
     // DSTAggregate Public Methods
-    DSTAggregate(std::vector<Primitive> p, LinearBVHNode *nodes, DSTBuildNode *rootNode);
+    DSTAggregate(std::vector<Primitive> p, LinearBVHNode *nodes);
 
     static DSTAggregate *Create(std::vector<Primitive> prims,
-                                   const ParameterDictionary &parameters, DSTBuildNode *rootNode);
+                                   const ParameterDictionary &parameters);
 
     Bounds3f Bounds() const;
     pstd::optional<ShapeIntersection> Intersect(const Ray &ray, Float tMax) const;
@@ -129,6 +129,7 @@ class DSTAggregate {
     void printDST(DSTBuildNode node, Bounds3f boundingBox, int depth);
 
     Bounds3f globalBB;
+    std::vector<DSTBuildNode> buildNodes;
 
   private:
     // DSTAggregate Private Methodes
@@ -136,6 +137,7 @@ class DSTAggregate {
                                    LinearBVHNode* nodes,
                                    int currentNodeIndex, int currentDepth);
     void FlattenDST(DSTBuildNode *node);
+    int addBuildNode(DSTBuildNode node, int index);
     void addNodeToDepthList(DSTBuildNode *node);
 
     // DSTAggregate Private Members
@@ -144,6 +146,7 @@ class DSTAggregate {
 
     std::vector<std::list<DSTBuildNode*>> nodesPerDepthLevel;
     int maximumDepth;
+    int numberOfDSTNodes;
 };
 
 class StackItem {
@@ -186,6 +189,7 @@ class WDSTAggregate {
     bool IntersectP(const Ray &ray, Float tMax) const;
 
   private:
+    static int reconstructTree(int index);
     WDSTBuildNode *BuildWDSTRecursively(ThreadLocal<Allocator> &threadAllocators, DSTBuildNode *splittingNode, float S, int currentDepth);
     void FlattenWDST(WDSTBuildNode *node);
     void addNodeToDepthList(WDSTBuildNode *node);
