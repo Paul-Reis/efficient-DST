@@ -93,8 +93,8 @@ BasicSceneBuilder::BasicSceneBuilder(BasicScene *scene)
     sampler.name = SceneEntity::internedStrings.Lookup("zsobol");
     filter.name = SceneEntity::internedStrings.Lookup("gaussian");
     integrator.name = SceneEntity::internedStrings.Lookup("volpath");
-    accelerator.name = SceneEntity::internedStrings.Lookup("dst");
-    //accelerator.name = SceneEntity::internedStrings.Lookup("wdst");
+    //accelerator.name = SceneEntity::internedStrings.Lookup("dst");
+    accelerator.name = SceneEntity::internedStrings.Lookup("wdst");
     //accelerator.name = SceneEntity::internedStrings.Lookup("bvh");
 
     film.name = SceneEntity::internedStrings.Lookup("rgb");

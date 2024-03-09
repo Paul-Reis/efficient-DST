@@ -130,6 +130,7 @@ class DSTAggregate {
 
     Bounds3f globalBB;
     std::vector<DSTBuildNode> buildNodes;
+    std::vector<Primitive> primitives;
 
   private:
     // DSTAggregate Private Methodes
@@ -141,7 +142,6 @@ class DSTAggregate {
     void addNodeToDepthList(DSTBuildNode *node);
 
     // DSTAggregate Private Members
-    std::vector<Primitive> primitives;
     std::vector<uint32_t> linearDST;
 
     std::vector<std::list<DSTBuildNode*>> nodesPerDepthLevel;
@@ -198,6 +198,24 @@ class WDSTAggregate {
                                            DSTBuildNode *nextRelevantDSTNode, float S,
                                            int currentDepth, float *SAH);
 
+    DSTBuildNode *getNextRelevantNode(DSTBuildNode *node);
+    WDSTBuildNode *transformDSTNode(ThreadLocal<Allocator> &threadAllocators,
+                                    DSTBuildNode node, int currentDepth);
+
+    WDSTBuildNode *getThreeCarvingNodes(ThreadLocal<Allocator> &threadAllocators,
+                                        std::vector<int> sidesToCarve, Bounds3f parentBB,
+                                        DSTBuildNode *nextRelevantDSTNode,
+                                        float *globalSAH, float S, int currentDepth);
+    WDSTBuildNode *getTwoCarvingNodes(ThreadLocal<Allocator> &threadAllocators,
+                                      std::vector<int> sidesToCarve, Bounds3f parentBB,
+                                      DSTBuildNode *nextRelevantDSTNode, float *globalSAH,
+                                      float S, int currentDepth);
+    WDSTBuildNode *getOneCarvingNode(ThreadLocal<Allocator> &threadAllocators,
+                                     std::vector<int> sidesToCarve, Bounds3f parentBB,
+                                     DSTBuildNode *nextRelevantDSTNode, float *SAH,
+                                     float S, int currentDepth);
+    WDSTBuildNode *getLowerEnd(WDSTBuildNode *node);
+
     std::vector<Primitive> primitives;
     std::vector<uint32_t> linearWDST;
     Bounds3f globalBB;
@@ -205,24 +223,6 @@ class WDSTAggregate {
     std::vector<std::list<WDSTBuildNode *>> nodesPerDepthLevel;
     int maximumDepth;
 };
-
-DSTBuildNode *getNextRelevantNode(DSTBuildNode *node);
-WDSTBuildNode *transformDSTNode(ThreadLocal<Allocator> &threadAllocators,
-                                DSTBuildNode node, int currentDepth);
-
-WDSTBuildNode *getThreeCarvingNodes(ThreadLocal<Allocator> &threadAllocators,
-                                    std::vector<int> sidesToCarve, Bounds3f parentBB,
-                                    DSTBuildNode *nextRelevantDSTNode, float *globalSAH,
-                                    float S, int currentDepth);
-WDSTBuildNode *getTwoCarvingNodes(ThreadLocal<Allocator> &threadAllocators,
-                                  std::vector<int> sidesToCarve, Bounds3f parentBB,
-                                  DSTBuildNode *nextRelevantDSTNode, float *globalSAH,
-                                  float S, int currentDepth);
-WDSTBuildNode *getOneCarvingNode(ThreadLocal<Allocator> &threadAllocators,
-                                 std::vector<int> sidesToCarve, Bounds3f parentBB,
-                                 DSTBuildNode *nextRelevantDSTNode, float *SAH, float S,
-                                 int currentDepth);
-WDSTBuildNode *getLowerEnd(WDSTBuildNode *node);
 
 Bounds3f carve(Bounds3f parentBB, Bounds3f childBB, std::vector<int> sidesToCarve,
                std::vector<float> &planes);
