@@ -74,6 +74,11 @@ uint32_t CARVING_TYPE = 0b11100000000000000000000000000000;
 uint32_t OFFSET = 0b00000011111111111111111111111111;
 uint32_t CARVING_PLANE_AXES = SPLITTING_PLANE_AXIS;
 uint32_t CORNER_TYPE = CARVING_PLANE_AXIS;
+float TRAVERSAL_COST_DST_SN = 1.0;
+float TRAVERSAL_COST_WDST_SMALL_SN = 1.0;
+float TRAVERSAL_COST_WDST_MEDIUM_SN = 2.0;
+float TRAVERSAL_COST_WDST_BIG_SN = 3.0;
+float TRAVERSAL_COST_BVH_NODE = 3.0;
 
 // MortonPrimitive Definition
 struct MortonPrimitive {
@@ -244,6 +249,9 @@ BVHAggregate::BVHAggregate(std::vector<Primitive> prims, int maxPrimsInNode,
 
     printBVH(*root);
     */
+    float SAH = calculateOverallSAH(*root);
+    bvhOverallSAHCost = SAH * 1000000;
+
     flattenBVH(root, &offset);
     CHECK_EQ(totalNodes.load(), offset);
 }
@@ -598,6 +606,19 @@ int BVHAggregate::flattenBVH(BVHBuildNode *node, int *offset) {
         linearNode->secondChildOffset = flattenBVH(node->children[1], offset);
     }
     return nodeOffset;
+}
+
+float BVHAggregate::calculateOverallSAH(BVHBuildNode node) {
+    float SAH = 0;
+    if (node.nPrimitives) {
+        SAH = node.nPrimitives;
+    } else {
+        float S = node.bounds.SurfaceArea();
+        SAH = TRAVERSAL_COST_BVH_NODE +
+              (node.children[0]->bounds.SurfaceArea() / S) * calculateOverallSAH(*node.children[0]) +
+              (node.children[1]->bounds.SurfaceArea() / S) * calculateOverallSAH(*node.children[1]);
+    }
+    return SAH;
 }
 
 Bounds3f BVHAggregate::Bounds() const {
@@ -1435,7 +1456,8 @@ DSTAggregate::DSTAggregate(std::vector<Primitive> prims, LinearBVHNode *BVHNodes
     }
     std::cout << '\n' << '\n' << "Primitives in Tree:" << '\n';
     */
-    this->printDST(*root, globalBB, 0);
+    float SAH = this->calculateOverallSAH(*root, globalBB, 0);
+    dstOverallSAHCost = SAH * 1000000;
 
     dstBytes = offset * 4;
     linearDST.resize(offset);
@@ -1829,23 +1851,16 @@ bool DSTAggregate::IntersectP(const Ray &ray, Float globalTMax) const {
     return false;
 }
 
-void DSTAggregate::printDST(DSTBuildNode node, Bounds3f boundingBox, int depth) {
-    std::string out;
-    for (int i = 0; i < depth; i++)
-        out = out + "   ";
+float DSTAggregate::calculateOverallSAH(DSTBuildNode node, Bounds3f parentBoundingBox, int depth) {
+    float SAH = 0.f;
+    Bounds3f boundingBox(parentBoundingBox);
     int header = (node.GetFlag() >> 27) & 15;
-    std::cout << out << boundingBox << '\n';
     if (node.IsLeaf()) {
-        std::cout << out << "Leaf" << '\n';
-        for (unsigned i = node.GetFlag() & OFFSET;; i++) {
-            std::cout << out << "Primitive: " << i << "  " << primitives[i].Bounds().ToString() << '\n';
-            if (primitives[i].isLast()) {
-                break;
-            }
-        }
-        std::cout << '\n';
+        SAH = node.NTriangles();
     } else if (node.IsCarving()) {
+        float traversalCost = 0.f;
         if (header >> 2 == 2) {
+            traversalCost = 0.3;
             if ((header & 3) == 0) {
                 if (node.plane2 != 0)
                 boundingBox.pMin.x = node.plane2;
@@ -1863,6 +1878,7 @@ void DSTAggregate::printDST(DSTBuildNode node, Bounds3f boundingBox, int depth) 
                 boundingBox.pMax.z = node.plane1;
             }
         } else if (header >> 2 == 0) { //xy
+            traversalCost = 0.5;
             if ((header & 3) == 0) {
                 if (node.plane1 != 0)
                 boundingBox.pMax.x = node.plane1;
@@ -1885,6 +1901,7 @@ void DSTAggregate::printDST(DSTBuildNode node, Bounds3f boundingBox, int depth) 
                 boundingBox.pMin.y = node.plane2;
             }
         } else if (header >> 2 == 1) {  //xz
+            traversalCost = 0.5;
             if ((header & 3) == 0) {
                 if (node.plane1 != 0)
                 boundingBox.pMax.x = node.plane1;
@@ -1907,6 +1924,7 @@ void DSTAggregate::printDST(DSTBuildNode node, Bounds3f boundingBox, int depth) 
                 boundingBox.pMin.z = node.plane2;
             }
         } else if (header >> 2 == 3) {  //yz
+            traversalCost = 0.5;
             if ((header & 3) == 0) {
                 if (node.plane1 != 0)
                 boundingBox.pMax.y = node.plane1;
@@ -1930,26 +1948,11 @@ void DSTAggregate::printDST(DSTBuildNode node, Bounds3f boundingBox, int depth) 
             }
         }
         if (node.isCarvingLeaf()) {
-            if (((node.GetFlag() >> 29) & 3) == 2) {
-                std::cout << out << "Single-Axis Carving Leaf with carved Bounding box: " << boundingBox.ToString() << '\n';
-            } else {
-                std::cout << out << "Dual-Axis Carving Leaf with carved Bounding box: " << boundingBox.ToString() << '\n';
-            }
-            for (unsigned i = node.GetFlag() & OFFSET;; i++) {
-                std::cout << out << "Primitive: " << i << "  " << primitives[i].Bounds().ToString() << '\n';
-                if (primitives[i].isLast()) {
-                    break;
-                }
-            }
+            SAH = traversalCost + (boundingBox.SurfaceArea() / parentBoundingBox.SurfaceArea()) * node.NTriangles();
         } else {
-            if (((node.GetFlag() >> 29) & 3) == 2)
-                std::cout << out << "Single-Axis Carving Node" << '\n';
-            else 
-                std::cout << out << "Dual-Axis Carving Node" << '\n';
-            printDST(*node.children[0], boundingBox, depth + 1);
+            SAH = traversalCost + (boundingBox.SurfaceArea() / parentBoundingBox.SurfaceArea()) * calculateOverallSAH(*node.children[0], boundingBox, depth + 1);
         }
     } else {
-        std::cout << out << "Splitting Node" << '\n';
         Bounds3f boundingBox1(boundingBox);
         Bounds3f boundingBox2(boundingBox);
         if (header >> 2 == 0) {
@@ -1962,9 +1965,12 @@ void DSTAggregate::printDST(DSTBuildNode node, Bounds3f boundingBox, int depth) 
             boundingBox1.pMax.z = node.plane1;
             boundingBox2.pMin.z = node.plane2;
         }
-        printDST(*node.children[0], boundingBox1, depth + 1);
-        printDST(*node.children[1], boundingBox2, depth + 1);
+        float S = parentBoundingBox.SurfaceArea();
+        SAH = TRAVERSAL_COST_DST_SN +
+               (boundingBox1.SurfaceArea() / S) * calculateOverallSAH(*node.children[0], boundingBox1, depth + 1) +
+               (boundingBox2.SurfaceArea() / S) * calculateOverallSAH(*node.children[1], boundingBox2, depth + 1);
     }
+    return SAH;
 }
 
 DSTBuildNode *DSTAggregate::BuildRecursiveFromBVH(ThreadLocal<Allocator> &threadAllocators,
@@ -2069,7 +2075,6 @@ DSTBuildNode *DSTAggregate::BuildRecursiveFromBVH(ThreadLocal<Allocator> &thread
             bestSAH = sumSAH;
         }
     }
-    dstOverallSAHCost += bestSAH * 1000000;
 
     if (switchChildren) {
         LinearBVHNode temp = leftChildNodeBVH;
@@ -2541,24 +2546,28 @@ StackItem::StackItem() {
 
 struct WDSTBuildNode {
   public:
-    void InitLeaf(int triangleOffset, int depthLevel) {
+    void InitLeaf(int triangleOffset, int depthLevel, int nPrimitives) {
         header = 0b000001;
         this->triangleOffset = triangleOffset;
         this->depthLevel = depthLevel;
+        this->nPrimitives = nPrimitives;
     }
 
-    void InitExistingCarving(float plane1, float plane2, WDSTBuildNode *child, int header, int triangleOffset, Bounds3f BB, int depthLevel) {
+    void InitExistingCarving(float plane1, float plane2, WDSTBuildNode *child, int header,
+                             int triangleOffset, Bounds3f BB, int depthLevel,
+                             int nPrimitives) {
         this->planes[0] = plane1;
         this->planes[1] = plane2;
         this->children[0] = child;
         this->header = header;
         this->triangleOffset = triangleOffset;
         this->depthLevel = depthLevel;
+        this->nPrimitives = nPrimitives;
         boundingBox = BB;
     }
 
     void InitNewCarving(float plane1, float plane2, WDSTBuildNode *child, int header,
-                             int triangleOffset, Bounds3f BB, int depthLevel) {
+                             int triangleOffset, Bounds3f BB, int depthLevel, int nPrimitives) {
         this->header = header;
         if ((header & 0b011000) == 0b010000) {
             this->planes[0] = plane2;
@@ -2570,6 +2579,7 @@ struct WDSTBuildNode {
         this->children[0] = child;
         this->triangleOffset = triangleOffset;
         this->depthLevel = depthLevel;
+        this->nPrimitives = nPrimitives;
         boundingBox = BB;
     }
 
@@ -2603,7 +2613,8 @@ struct WDSTBuildNode {
     int offset;
     int header;
     int axes; //wird nur für SN gebraucht, kann man eventuell noch eleganter speichern
-    int depthLevel; 
+    int depthLevel;
+    int nPrimitives;
 };
 
 WDSTAggregate::WDSTAggregate(std::vector<Primitive> prims, DSTBuildNode node, Bounds3f globalBB)
@@ -2646,48 +2657,24 @@ WDSTAggregate::WDSTAggregate(std::vector<Primitive> prims, DSTBuildNode node, Bo
     }
     std::cout << '\n' << '\n' << "Primitives in Tree:" << '\n';*/
 
-    this->printWDST(*root, globalBB, 0);
+    float SAH = this->calculateOverallSAH(*root, globalBB, 0);
+    overallSAHCost = SAH * 1000000;
 
     wdstBytes = offset * 4;
     linearWDST.resize(offset);
     FlattenWDST(root);
-    
-    /*
-    std::cout << '\n' << "Primitive in linear Tree:" << '\n';
-    int idx = 0;
-    while (idx < linearWDST.size()) {
-        int entry = linearWDST[idx];
-        if (entry & IS_LEAF) {
-            std::cout << (entry & OFFSET) << '\n';
-            if (entry & IS_CARVING)
-                idx += 3;
-            else
-                idx++;
-        } else {
-            int size = entry >> 29;
-            idx += 2 + 2 * size;
-        }   
-    }*/
 }
 
-void WDSTAggregate::printWDST(WDSTBuildNode node, Bounds3f boundingBox, int depth) {
-    std::string out;
-    for (int i = 0; i < depth; i++)
-        out = out + "   ";
+float WDSTAggregate::calculateOverallSAH(WDSTBuildNode node, Bounds3f parentBoundingBox, int depth) {
     int header = node.header >> 1;
-    std::cout << out << boundingBox << '\n';
+    Bounds3f boundingBox(parentBoundingBox);
+    float SAH = 0.f;
     if (node.IsLeaf() && !node.IsCarving()) {
-        std::cout << out << "Leaf" << '\n';
-        for (unsigned i = node.triangleOffset;; i++) {
-            std::cout << out << "Primitive: " << i << "  "
-                      << primitives[i].Bounds().ToString() << '\n';
-            if (primitives[i].isLast()) {
-                break;
-            }
-        }
-        std::cout << '\n';
+        SAH = node.nPrimitives;
     } else if (node.IsCarving()) {
+        float traversalCost = 0.f;
         if (((header >> 2) & 3) == 2) {
+            traversalCost = 0.3;
             if ((header & 3) == 0) {
                 if (node.planes[1] != 0)
                     boundingBox.pMin.x = node.planes[1];
@@ -2705,6 +2692,7 @@ void WDSTAggregate::printWDST(WDSTBuildNode node, Bounds3f boundingBox, int dept
                     boundingBox.pMax.z = node.planes[0];
             }
         } else if (((header >> 2) & 3) == 0) {  // xy
+            traversalCost = 0.5;
             if ((header & 3) == 0) {
                 if (node.planes[0] != 0)
                     boundingBox.pMax.x = node.planes[0];
@@ -2727,6 +2715,7 @@ void WDSTAggregate::printWDST(WDSTBuildNode node, Bounds3f boundingBox, int dept
                     boundingBox.pMin.y = node.planes[1];
             }
         } else if (((header >> 2) & 3) == 1) {  // xz
+            traversalCost = 0.5;
             if ((header & 3) == 0) {
                 if (node.planes[0] != 0)
                     boundingBox.pMax.x = node.planes[0];
@@ -2749,6 +2738,7 @@ void WDSTAggregate::printWDST(WDSTBuildNode node, Bounds3f boundingBox, int dept
                     boundingBox.pMin.z = node.planes[1];
             }
         } else if (((header >> 2) & 3) == 3) {  // yz
+            traversalCost = 0.5;
             if ((header & 3) == 0) {
                 if (node.planes[0] != 0)
                     boundingBox.pMax.y = node.planes[0];
@@ -2772,29 +2762,11 @@ void WDSTAggregate::printWDST(WDSTBuildNode node, Bounds3f boundingBox, int dept
             }
         }
         if (node.IsLeaf()) {
-            if (((header >> 2) & 3) == 2) {
-                std::cout << out << "Single-Axis Carving Leaf with carved Bounding box: "
-                          << boundingBox.ToString() << '\n';
-            } else {
-                std::cout << out << "Dual-Axis Carving Leaf with carved Bounding box: "
-                          << boundingBox.ToString() << '\n';
-            }
-            for (unsigned i = node.triangleOffset;; i++) {
-                std::cout << out << "Primitive: " << i << "  "
-                          << primitives[i].Bounds().ToString() << '\n';
-                if (primitives[i].isLast()) {
-                    break;
-                }
-            }
+            SAH = traversalCost + (boundingBox.SurfaceArea() / parentBoundingBox.SurfaceArea()) * node.nPrimitives;
         } else {
-            if (((header >> 2) & 3) == 2)
-                std::cout << out << "Single-Axis Carving Node" << '\n';
-            else
-                std::cout << out << "Dual-Axis Carving Node" << '\n';
-            printWDST(*node.children[0], boundingBox, depth + 1);
+            SAH = traversalCost + (boundingBox.SurfaceArea() / parentBoundingBox.SurfaceArea()) * calculateOverallSAH(*node.children[0], boundingBox, depth + 1);
         }
     } else {
-        std::cout << out << "Splitting Node" << '\n';
         Bounds3f boundingBox1(boundingBox);
         Bounds3f boundingBox2(boundingBox);
         int size = header >> 2;
@@ -2809,14 +2781,12 @@ void WDSTAggregate::printWDST(WDSTBuildNode node, Bounds3f boundingBox, int dept
             boundingBox1.pMax.z = node.planes[0];
             boundingBox2.pMin.z = node.planes[1];
         }
-        std::cout << out << boundingBox1.ToString() << '\n';
-        std::cout << out << boundingBox2.ToString() << '\n';
         if ((header & 3) == 0) {
-            std::cout << out << "Size small" << '\n';
-            printWDST(*node.children[0], boundingBox1, depth + 1);
-            printWDST(*node.children[2], boundingBox2, depth + 1);
+            float S = parentBoundingBox.SurfaceArea();
+            SAH += TRAVERSAL_COST_WDST_SMALL_SN +
+                   (boundingBox1.SurfaceArea() / S) * calculateOverallSAH(*node.children[0], boundingBox1, depth + 1) +
+                   (boundingBox2.SurfaceArea() / S) * calculateOverallSAH(*node.children[2], boundingBox2, depth + 1);
         } else if ((header & 3) == 1) {
-            std::cout << out << "Size medium (right double)" << '\n';
             int axis2 = node.axes & 3;
             Bounds3f boundingBox21(boundingBox2);
             Bounds3f boundingBox22(boundingBox2);
@@ -2830,11 +2800,12 @@ void WDSTAggregate::printWDST(WDSTBuildNode node, Bounds3f boundingBox, int dept
                 boundingBox21.pMax.z = node.planes[4];
                 boundingBox22.pMin.z = node.planes[5];
             }
-            printWDST(*node.children[0], boundingBox1, depth + 1);
-            printWDST(*node.children[2], boundingBox21, depth + 1);
-            printWDST(*node.children[3], boundingBox22, depth + 1);
+            float S = parentBoundingBox.SurfaceArea();
+            SAH += TRAVERSAL_COST_WDST_MEDIUM_SN +
+                   (boundingBox1.SurfaceArea() / S) * calculateOverallSAH(*node.children[0], boundingBox1, depth + 1) +
+                   (boundingBox21.SurfaceArea() / S) * calculateOverallSAH(*node.children[2], boundingBox21, depth + 1) +
+                   (boundingBox22.SurfaceArea() / S) * calculateOverallSAH(*node.children[3], boundingBox22, depth + 1);
         } else if ((header & 3) == 2) {
-            std::cout << out << "Size medium (left double)" << '\n';
             int axis1 = node.axes & 3;
             Bounds3f boundingBox11(boundingBox1);
             Bounds3f boundingBox12(boundingBox1);
@@ -2848,11 +2819,12 @@ void WDSTAggregate::printWDST(WDSTBuildNode node, Bounds3f boundingBox, int dept
                 boundingBox11.pMax.z = node.planes[2];
                 boundingBox12.pMin.z = node.planes[3];
             }
-            printWDST(*node.children[0], boundingBox11, depth + 1);
-            printWDST(*node.children[1], boundingBox12, depth + 1);
-            printWDST(*node.children[2], boundingBox2, depth + 1);
+            float S = parentBoundingBox.SurfaceArea();
+            SAH += TRAVERSAL_COST_WDST_MEDIUM_SN +
+                   (boundingBox11.SurfaceArea() / S) * calculateOverallSAH(*node.children[0], boundingBox11, depth + 1) +
+                   (boundingBox12.SurfaceArea() / S) * calculateOverallSAH(*node.children[1], boundingBox12, depth + 1) +
+                   (boundingBox2.SurfaceArea() / S) * calculateOverallSAH(*node.children[2], boundingBox2, depth + 1);
         } else if ((header & 3) == 3) {
-            std::cout << out << "Size big" << '\n';
             int axis1 = (node.axes >> 2) & 3;
             Bounds3f boundingBox11(boundingBox1);
             Bounds3f boundingBox12(boundingBox1);
@@ -2879,12 +2851,15 @@ void WDSTAggregate::printWDST(WDSTBuildNode node, Bounds3f boundingBox, int dept
                 boundingBox21.pMax.z = node.planes[4];
                 boundingBox22.pMin.z = node.planes[5];
             }
-            printWDST(*node.children[0], boundingBox11, depth + 1);
-            printWDST(*node.children[1], boundingBox12, depth + 1);
-            printWDST(*node.children[2], boundingBox21, depth + 1);
-            printWDST(*node.children[3], boundingBox22, depth + 1);
+            float S = parentBoundingBox.SurfaceArea();
+            SAH += TRAVERSAL_COST_WDST_BIG_SN +
+                   (boundingBox11.SurfaceArea() / S) * calculateOverallSAH(*node.children[0], boundingBox11, depth + 1) +
+                   (boundingBox12.SurfaceArea() / S) * calculateOverallSAH(*node.children[1], boundingBox12, depth + 1) +
+                   (boundingBox21.SurfaceArea() / S) * calculateOverallSAH(*node.children[2], boundingBox21, depth + 1) +
+                   (boundingBox22.SurfaceArea() / S) * calculateOverallSAH(*node.children[3], boundingBox22, depth + 1);
         }
     }
+    return SAH;
 }
 
 WDSTAggregate *WDSTAggregate::Create(std::vector<Primitive> prims,
@@ -3644,7 +3619,7 @@ WDSTBuildNode *WDSTAggregate::BuildWDSTRecursively(
     WDSTBuildNode *node = alloc.new_object<WDSTBuildNode>();
 
     if (splittingNode->IsLeaf()) {
-        node->InitLeaf(splittingNode->offsetToFirstChild(), currentDepth);
+        node->InitLeaf(splittingNode->offsetToFirstChild(), currentDepth, splittingNode->NTriangles());
         if (currentDepth > maximumDepth)
             maximumDepth++;
         return node;
@@ -3652,6 +3627,7 @@ WDSTBuildNode *WDSTAggregate::BuildWDSTRecursively(
 
     node->planes[0] = splittingNode->plane1;
     node->planes[1] = splittingNode->plane2;
+    node->nPrimitives = 0;
     node->axes = splittingNode->GetSplittingPlanesAxis();
     node->boundingBox = splittingNode->GetBB();
     node->depthLevel = currentDepth;
@@ -3684,7 +3660,6 @@ WDSTBuildNode *WDSTAggregate::BuildWDSTRecursively(
         WDSTBuildNode *child1 = determineCNConstelation(
             threadAllocators, doubleSplitBB1, nextNode, S,
             currentDepth + 1, &SAH);
-        overallSAHCost += SAH * 1000000;
         WDSTBuildNode *lowerEnd = getLowerEnd(child1);
         if (child1 == NULL) { //If there is a SN directly after the parent SN in the WDST
             node->children[0] = BuildWDSTRecursively(threadAllocators, nextNode, firstUnderlyingSN->GetBB().SurfaceArea(), currentDepth + 1);
@@ -3699,7 +3674,6 @@ WDSTBuildNode *WDSTAggregate::BuildWDSTRecursively(
         WDSTBuildNode *child2 = determineCNConstelation(
             threadAllocators, doubleSplitBB2, nextNode, S,
             currentDepth + 1, &SAH);
-        overallSAHCost += SAH * 1000000;
         lowerEnd = getLowerEnd(child2);
         if (child2 == NULL) {  
             node->children[1] = BuildWDSTRecursively(
@@ -3735,7 +3709,6 @@ WDSTBuildNode *WDSTAggregate::BuildWDSTRecursively(
         WDSTBuildNode *child1 = determineCNConstelation(
             threadAllocators, doubleSplitBB3, nextNode, S,
             currentDepth + 1, &SAH);
-        overallSAHCost += SAH * 1000000;
         WDSTBuildNode *lowerEnd = getLowerEnd(child1);
         if (child1 == NULL) {
             node->children[2] = BuildWDSTRecursively(
@@ -3754,7 +3727,6 @@ WDSTBuildNode *WDSTAggregate::BuildWDSTRecursively(
         WDSTBuildNode *child2 = determineCNConstelation(
             threadAllocators, doubleSplitBB4, nextNode, S,
             currentDepth + 1, &SAH);
-        overallSAHCost += SAH * 1000000;
         lowerEnd = getLowerEnd(child2);
         if (child2 == NULL) {
             node->children[3] = BuildWDSTRecursively(
@@ -3860,14 +3832,14 @@ WDSTBuildNode *WDSTAggregate::transformDSTNode(ThreadLocal<Allocator> &threadAll
     WDSTBuildNode *wdstNode = returnNode;
     while (node.IsCarving()  && !node.isCarvingLeaf()) {
         WDSTBuildNode *nextNode = alloc.new_object<WDSTBuildNode>();
-        wdstNode->InitExistingCarving(node.plane1, node.plane2, nextNode, node.GetHeader(), 0, node.GetBB(), currentDepth++);
+        wdstNode->InitExistingCarving(node.plane1, node.plane2, nextNode, node.GetHeader(), 0, node.GetBB(), currentDepth++, node.NTriangles());
         node = *node.children[0];
         wdstNode = nextNode;
     }
     if (node.isCarvingLeaf()) {
-        wdstNode->InitExistingCarving(node.plane1, node.plane2, NULL, node.GetHeader(), node.offsetToFirstChild(), node.GetBB(), currentDepth++);
+        wdstNode->InitExistingCarving(node.plane1, node.plane2, NULL, node.GetHeader(), node.offsetToFirstChild(), node.GetBB(), currentDepth++, node.NTriangles());
     } else {
-        wdstNode->InitLeaf(node.offsetToFirstChild(), currentDepth);
+        wdstNode->InitLeaf(node.offsetToFirstChild(), currentDepth, node.NTriangles());
     }
     if (currentDepth > maximumDepth)
         maximumDepth++;
@@ -3977,7 +3949,7 @@ WDSTBuildNode *WDSTAggregate::getThreeCarvingNodes(
             }
 
             node->InitNewCarving(planes[0], planes[1], getTwoCarvingNodes(threadAllocators, sidesToCarveCopy, carvedParentBB,
-                                   nextRelevantDSTNode, &SAH, S, currentDepth + 1), header, 0, parentBB, currentDepth);
+                                   nextRelevantDSTNode, &SAH, S, currentDepth + 1), header, 0, parentBB, currentDepth, 0);
             
             if(SAH < bestSAH) {
                 bestSAH = SAH;
@@ -4032,7 +4004,7 @@ WDSTBuildNode *WDSTAggregate::getTwoCarvingNodes(ThreadLocal<Allocator> &threadA
             }
 
             node->InitNewCarving( planes[0], planes[1], getOneCarvingNode(threadAllocators, sidesToCarveCopy, carvedParentBB,
-                nextRelevantDSTNode, &SAH, S, currentDepth + 1), header, 0, parentBB, currentDepth);
+                nextRelevantDSTNode, &SAH, S, currentDepth + 1), header, 0, parentBB, currentDepth, 0);
 
             if (SAH < bestSAH) {
                 bestSAH = SAH;
@@ -4089,10 +4061,10 @@ WDSTBuildNode *WDSTAggregate::getOneCarvingNode(ThreadLocal<Allocator> &threadAl
     }
     if (nextRelevantDSTNode->IsLeaf() || nextRelevantDSTNode->isCarvingLeaf()) {
         header |= 1;
-        node->InitNewCarving(planes[0], planes[1], NULL, header, nextRelevantDSTNode->offsetToFirstChild(), parentBB, currentDepth);
+        node->InitNewCarving(planes[0], planes[1], NULL, header, nextRelevantDSTNode->offsetToFirstChild(), parentBB, currentDepth, nextRelevantDSTNode->NTriangles());
         *SAH += (carvedParentBB.SurfaceArea() / S) * nextRelevantDSTNode->NTriangles();
     } else {
-        node->InitNewCarving(planes[0], planes[1], NULL, header, 0, parentBB, currentDepth);
+        node->InitNewCarving(planes[0], planes[1], NULL, header, 0, parentBB, currentDepth, 0);
     }
     if (currentDepth > maximumDepth)
         maximumDepth++;

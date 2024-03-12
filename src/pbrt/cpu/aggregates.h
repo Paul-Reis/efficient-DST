@@ -71,6 +71,7 @@ class BVHAggregate {
                                 std::vector<BVHBuildNode *> &treeletRoots, int start,
                                 int end, std::atomic<int> *totalNodes) const;
     int flattenBVH(BVHBuildNode *node, int *offset);
+    float calculateOverallSAH(BVHBuildNode node);
 
     // BVHAggregate Private Members
     int maxPrimsInNode;
@@ -126,7 +127,7 @@ class DSTAggregate {
     Bounds3f Bounds() const;
     pstd::optional<ShapeIntersection> Intersect(const Ray &ray, Float tMax) const;
     bool IntersectP(const Ray &ray, Float tMax) const;
-    void printDST(DSTBuildNode node, Bounds3f boundingBox, int depth);
+    float calculateOverallSAH(DSTBuildNode node, Bounds3f boundingBox, int depth);
 
     Bounds3f globalBB;
     std::vector<DSTBuildNode> buildNodes;
@@ -193,7 +194,7 @@ class WDSTAggregate {
     bool IntersectP(const Ray &ray, Float tMax) const;
 
   private:
-    void printWDST(WDSTBuildNode node, Bounds3f boundingBox, int depth);
+    float calculateOverallSAH(WDSTBuildNode node, Bounds3f boundingBox, int depth);
     static int reconstructTree(int index);
     WDSTBuildNode *BuildWDSTRecursively(ThreadLocal<Allocator> &threadAllocators, DSTBuildNode *splittingNode, float S, int currentDepth);
     void FlattenWDST(WDSTBuildNode *node);
