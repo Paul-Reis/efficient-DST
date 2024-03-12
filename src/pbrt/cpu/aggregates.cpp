@@ -23,16 +23,20 @@
 namespace pbrt {
 
 STAT_MEMORY_COUNTER("Memory/BVH", treeBytes);
+STAT_MEMORY_COUNTER("Memory/DST", dstBytes);
+STAT_MEMORY_COUNTER("Memory/WDST", wdstBytes);
+
 STAT_RATIO("BVH/Primitives per leaf node", totalPrimitives, totalLeafNodes);
 STAT_COUNTER("BVH/Interior nodes", interiorNodes);
 STAT_COUNTER("BVH/Leaf nodes", leafNodes);
-STAT_COUNTER("BVH/SAH Cost", bvhOverallSAHCost);//TODO: count SAH
+STAT_COUNTER("SAH/BVH Cost * 1000000", bvhOverallSAHCost);//TODO: count SAH
 STAT_PIXEL_COUNTER("BVH/Nodes visited", bvhNodesVisited);
+
 STAT_COUNTER("Accelerator/If 1 BVH, if 10 DST, if 100 WDST", testForDst);
 
 STAT_RATIO("DST/Average Plane Intersection Tests per Ray", dstPlaneIntersections, dstRays);
 STAT_RATIO("DST/Average Triangle Intersection Tests per Ray", dstTriangleIntersections, dstRays1);
-STAT_COUNTER("DST/SAH Cost", dstOverallSAHCost);//TODO: should be a float counter but float counter does not work
+STAT_COUNTER("SAH/DST Cost * 1000000", dstOverallSAHCost);
 STAT_COUNTER("DST/Nodes", dstNumberOfNodes);
 STAT_COUNTER("DST/Splitting Nodes", dstNumberOfSplittingNodes);
 STAT_COUNTER("DST/Carving Nodes", dstNumberOfCarvingNodes);
@@ -47,7 +51,7 @@ STAT_COUNTER("DST/Dual-Axis Carving Nodes", dualAxisCNs);
 
 STAT_RATIO("WDST/Average Plane Intersection Tests per Ray", wdstPlaneIntersections, wdstRays);
 STAT_RATIO("WDST/Average Triangle Intersection Tests per Ray", wdstTriangleIntersections, wdstRays1);
-STAT_COUNTER("WDST/SAH Cost", overallSAHCost);//TODO: should be a float counter but float counter does not work
+STAT_COUNTER("SAH/WDST Cost * 1000000", overallSAHCost);
 STAT_COUNTER("WDST/Nodes", numberOfNodes);
 STAT_COUNTER("WDST/Splitting Nodes", numberOfSplittingNodes);
 STAT_COUNTER("WDST/Carving Nodes", numberOfCarvingNodes);
@@ -57,9 +61,9 @@ STAT_COUNTER("WDST/Carving Node Sets Size 0", setsWithZero);
 STAT_COUNTER("WDST/Carving Node Sets Size 1", setsWithOne);
 STAT_COUNTER("WDST/Carving Node Sets Size 2", setsWithTwo);
 STAT_COUNTER("WDST/Carving Node Sets Size 3", setsWithThree);
-STAT_COUNTER("WDST/Small Splitting Nodes", smallSplittingNodes)
-STAT_COUNTER("WDST/Medium Splitting Nodes", mediumSplittingNodes);
-STAT_COUNTER("WDST/Big Splitting Nodes", bigSplittingNodes);
+STAT_COUNTER("WDST/Splitting Nodes Size Small", smallSplittingNodes)
+STAT_COUNTER("WDST/Splitting Nodes Size Medium", mediumSplittingNodes);
+STAT_COUNTER("WDST/Splitting Nodes Size Big", bigSplittingNodes);
 
 
 uint32_t IS_LEAF = 0b00000100000000000000000000000000;
@@ -410,7 +414,9 @@ BVHBuildNode *BVHAggregate::buildRecursive(ThreadLocal<Allocator> &threadAllocat
                                 return b <= minCostSplitBucket;
                             });
                         mid = midIter - bvhPrimitives.begin();
+                        bvhOverallSAHCost += minCost * 1000000;
                     } else {
+                        bvhOverallSAHCost += leafCost * 1000000;
                         // Create leaf _BVHBuildNode_
                         int firstPrimOffset =
                             orderedPrimsOffset->fetch_add(bvhPrimitives.size());
@@ -1428,9 +1434,10 @@ DSTAggregate::DSTAggregate(std::vector<Primitive> prims, LinearBVHNode *BVHNodes
         std::cout << primitives[i].Bounds().ToString() << "    " << primitives[i].isLast() << '\n';
     }
     std::cout << '\n' << '\n' << "Primitives in Tree:" << '\n';
-    
-    this->printDST(*root, globalBB, 0);*/
+    */
+    this->printDST(*root, globalBB, 0);
 
+    dstBytes = offset * 4;
     linearDST.resize(offset);
     FlattenDST(root);
 
@@ -1524,7 +1531,7 @@ pstd::optional<ShapeIntersection> DSTAggregate::Intersect(const Ray &ray,
     if (tMin < 0)
         tMin = 0;
 
-    StackItem* stack = new StackItem[maximumDepth];
+    StackItem* stack = new StackItem[maximumDepth + 1];
     int stackPtr = -1;
 
     while (true) {
@@ -2039,8 +2046,8 @@ DSTBuildNode *DSTAggregate::BuildRecursiveFromBVH(ThreadLocal<Allocator> &thread
                 switchChildrenLocal = true;
                 leftChildBounds.pMax.z = rightChildNodeBVH.bounds.pMax.z;
                 rightChildBounds.pMin.z = leftChildNodeBVH.bounds.pMin.z;
-                nodesPlanes[12] = rightChildNodeBVH.bounds.pMin.z;
-                nodesPlanes[13] = leftChildNodeBVH.bounds.pMax.z;
+                nodesPlanes[12] = rightChildNodeBVH.bounds.pMax.z;
+                nodesPlanes[13] = leftChildNodeBVH.bounds.pMin.z;
             }
         }
         nodesBB[0] = leftChildBounds;
@@ -2060,7 +2067,7 @@ DSTBuildNode *DSTAggregate::BuildRecursiveFromBVH(ThreadLocal<Allocator> &thread
             bestSAH = sumSAH;
         }
     }
-    dstOverallSAHCost += bestSAH;
+    dstOverallSAHCost += bestSAH * 1000000;
 
     if (switchChildren) {
         LinearBVHNode temp = leftChildNodeBVH;
@@ -2070,6 +2077,10 @@ DSTBuildNode *DSTAggregate::BuildRecursiveFromBVH(ThreadLocal<Allocator> &thread
         indexToLeftBVHChild = IndexToRightBVHChild;
         IndexToRightBVHChild = tempI;
     }
+    
+    std::vector<float> irrelevantPlanes = {0.f, 0.f};
+    Bounds3f leftBBAfterSplit = carve(parentNodeBVH.bounds, leftChildNodeBVH.bounds, {bestNodeComposition[12] + 4}, irrelevantPlanes);
+    Bounds3f rightBBAfterSplit = carve(parentNodeBVH.bounds, rightChildNodeBVH.bounds, {bestNodeComposition[12] + 1}, irrelevantPlanes);
 
     bool lastLeftChildIsLeaf = leftChildNodeBVH.nPrimitives;
     bool lastRightChildIsLeaf = rightChildNodeBVH.nPrimitives;
@@ -2083,35 +2094,40 @@ DSTBuildNode *DSTAggregate::BuildRecursiveFromBVH(ThreadLocal<Allocator> &thread
         setSize++;
         DSTBuildNode *nextNode = alloc.new_object<DSTBuildNode>();
         depthLevel++;
+        Bounds3f carvingNodeBB;
+        if (nextCarvingNode == 0 && (!lastLeftChildIsLeaf || bestNodeComposition[2]))
+            carvingNodeBB = leftBBAfterSplit;
+        else
+            carvingNodeBB = leftChildNodeBVH.bounds;
         if (bestNodeComposition[nextCarvingNode] == 3) {
-            if (bestNodeComposition[nextCarvingNode + 2]) {
+            if (bestNodeComposition[nextCarvingNode + 2] && nextCarvingNode < 4) {
                 nextNodeP1->InitSingleAxisCarving(
                     bestNodeComposition[nextCarvingNode + 1], nextNode, 0, 0, depthLevel,
                     bestNodesPlanes[nextCarvingNode],
-                    bestNodesPlanes[nextCarvingNode + 1], leftChildNodeBVH.bounds, leftChildNodeBVH.nPrimitives);
+                    bestNodesPlanes[nextCarvingNode + 1], carvingNodeBB, leftChildNodeBVH.nPrimitives);
             } else {
                 nextNodeP1->InitSingleAxisCarving(
                     bestNodeComposition[nextCarvingNode + 1], nextNode,
                     lastLeftChildIsLeaf, leftChildNodeBVH.primitivesOffset, depthLevel,
                     bestNodesPlanes[nextCarvingNode],
-                    bestNodesPlanes[nextCarvingNode + 1], leftChildNodeBVH.bounds,
+                    bestNodesPlanes[nextCarvingNode + 1], carvingNodeBB,
                     leftChildNodeBVH.nPrimitives);
             }
         } else {
             int planeAxesAndCornerType = (bestNodeComposition[nextCarvingNode] - 1) << 2 |
                                          bestNodeComposition[nextCarvingNode + 1];
-            if (bestNodeComposition[nextCarvingNode + 2]) {
+            if (bestNodeComposition[nextCarvingNode + 2] && nextCarvingNode < 4) {
                 nextNodeP1->InitDoubleAxisCarving(
                     planeAxesAndCornerType, nextNode, 0, 0, depthLevel,
                     bestNodesPlanes[nextCarvingNode],
-                    bestNodesPlanes[nextCarvingNode + 1], leftChildNodeBVH.bounds,
+                    bestNodesPlanes[nextCarvingNode + 1], carvingNodeBB,
                     leftChildNodeBVH.nPrimitives);
             } else {
                 nextNodeP1->InitDoubleAxisCarving(
                     planeAxesAndCornerType, nextNode,
                     lastLeftChildIsLeaf, leftChildNodeBVH.primitivesOffset, depthLevel,
                     bestNodesPlanes[nextCarvingNode],
-                    bestNodesPlanes[nextCarvingNode + 1], leftChildNodeBVH.bounds,
+                    bestNodesPlanes[nextCarvingNode + 1], carvingNodeBB,
                     leftChildNodeBVH.nPrimitives);
             }
         }
@@ -2147,36 +2163,41 @@ DSTBuildNode *DSTAggregate::BuildRecursiveFromBVH(ThreadLocal<Allocator> &thread
         setSize++;
         DSTBuildNode *nextNode = alloc.new_object<DSTBuildNode>();
         depthLevel++;
+        Bounds3f carvingNodeBB;
+        if (nextCarvingNode == 6 && (!lastRightChildIsLeaf || bestNodeComposition[8]))
+            carvingNodeBB = rightBBAfterSplit;
+        else
+            carvingNodeBB = rightChildNodeBVH.bounds;
         if (bestNodeComposition[nextCarvingNode] == 3) {
-            if (bestNodeComposition[nextCarvingNode + 2]) {
+            if (bestNodeComposition[nextCarvingNode + 2] && nextCarvingNode < 10) {
                 nextNodeP2->InitSingleAxisCarving(
                     bestNodeComposition[nextCarvingNode + 1], nextNode, 0, 0, depthLevel,
                     bestNodesPlanes[nextCarvingNode],
-                    bestNodesPlanes[nextCarvingNode + 1], rightChildNodeBVH.bounds,
+                    bestNodesPlanes[nextCarvingNode + 1], carvingNodeBB,
                     rightChildNodeBVH.nPrimitives);
             } else {
                 nextNodeP2->InitSingleAxisCarving(
                     bestNodeComposition[nextCarvingNode + 1], nextNode,
                     lastRightChildIsLeaf, rightChildNodeBVH.primitivesOffset, depthLevel,
                     bestNodesPlanes[nextCarvingNode],
-                    bestNodesPlanes[nextCarvingNode + 1], rightChildNodeBVH.bounds,
+                    bestNodesPlanes[nextCarvingNode + 1], carvingNodeBB,
                     rightChildNodeBVH.nPrimitives);
             }
         } else {
             int planeAxesAndCornerType = (bestNodeComposition[nextCarvingNode] - 1) << 2 |
                                          bestNodeComposition[nextCarvingNode + 1];
-            if (bestNodeComposition[nextCarvingNode + 2]) {
+            if (bestNodeComposition[nextCarvingNode + 2] && nextCarvingNode < 10) {
                 nextNodeP2->InitDoubleAxisCarving(
                     planeAxesAndCornerType, nextNode, 0, 0, depthLevel,
                     bestNodesPlanes[nextCarvingNode],
-                    bestNodesPlanes[nextCarvingNode + 1], rightChildNodeBVH.bounds,
+                    bestNodesPlanes[nextCarvingNode + 1], carvingNodeBB,
                     rightChildNodeBVH.nPrimitives);
             } else {
                 nextNodeP2->InitDoubleAxisCarving(
                     planeAxesAndCornerType, nextNode,
                     lastRightChildIsLeaf, rightChildNodeBVH.primitivesOffset, depthLevel,
                     bestNodesPlanes[nextCarvingNode],
-                    bestNodesPlanes[nextCarvingNode + 1], rightChildNodeBVH.bounds,
+                    bestNodesPlanes[nextCarvingNode + 1], carvingNodeBB,
                     rightChildNodeBVH.nPrimitives);
             }
         }
@@ -2487,6 +2508,18 @@ struct WDSTBuildNode {
     }
 
     void InitExistingCarving(float plane1, float plane2, WDSTBuildNode *child, int header, int triangleOffset, Bounds3f BB, int depthLevel) {
+        this->planes[0] = plane1;
+        this->planes[1] = plane2;
+        this->children[0] = child;
+        this->header = header;
+        this->triangleOffset = triangleOffset;
+        this->depthLevel = depthLevel;
+        boundingBox = BB;
+    }
+
+    void InitNewCarving(float plane1, float plane2, WDSTBuildNode *child, int header,
+                             int triangleOffset, Bounds3f BB, int depthLevel) {
+        this->header = header;
         if ((header & 0b011000) == 0b010000) {
             this->planes[0] = plane2;
             this->planes[1] = plane1;
@@ -2495,7 +2528,6 @@ struct WDSTBuildNode {
             this->planes[1] = plane2;
         }
         this->children[0] = child;
-        this->header = header;
         this->triangleOffset = triangleOffset;
         this->depthLevel = depthLevel;
         boundingBox = BB;
@@ -2522,6 +2554,7 @@ struct WDSTBuildNode {
         return size;
     }
     int GetDepthLevel() const { return depthLevel; }
+    int PlaneAsInt(int idx) { return *reinterpret_cast<int *>(&planes[idx]); }
 
     uint32_t triangleOffset;
     std::array<WDSTBuildNode*, 4> children;
@@ -2565,10 +2598,254 @@ WDSTAggregate::WDSTAggregate(std::vector<Primitive> prims, DSTBuildNode node, Bo
         }
     }
 
+    /*
+    std::cout << "Primitive List:" << '\n';
+    for (int i = 0; i < primitives.size(); i++) {
+        std::cout << primitives[i].Bounds().ToString() << "    " << primitives[i].isLast()
+    << '\n';
+    }
+    std::cout << '\n' << '\n' << "Primitives in Tree:" << '\n';*/
+
+    this->printWDST(*root, globalBB, 0);
+
+    wdstBytes = offset * 4;
     linearWDST.resize(offset);
     FlattenWDST(root);
+    
+    /*
+    std::cout << '\n' << "Primitive in linear Tree:" << '\n';
+    int idx = 0;
+    while (idx < linearWDST.size()) {
+        int entry = linearWDST[idx];
+        if (entry & IS_LEAF) {
+            std::cout << (entry & OFFSET) << '\n';
+            if (entry & IS_CARVING)
+                idx += 3;
+            else
+                idx++;
+        } else {
+            int size = entry >> 29;
+            idx += 2 + 2 * size;
+        }   
+    }*/
 }
 
+void WDSTAggregate::printWDST(WDSTBuildNode node, Bounds3f boundingBox, int depth) {
+    std::string out;
+    for (int i = 0; i < depth; i++)
+        out = out + "   ";
+    int header = node.header >> 1;
+    std::cout << out << boundingBox << '\n';
+    if (node.IsLeaf() && !node.IsCarving()) {
+        std::cout << out << "Leaf" << '\n';
+        for (unsigned i = node.triangleOffset;; i++) {
+            std::cout << out << "Primitive: " << i << "  "
+                      << primitives[i].Bounds().ToString() << '\n';
+            if (primitives[i].isLast()) {
+                break;
+            }
+        }
+        std::cout << '\n';
+    } else if (node.IsCarving()) {
+        if (((header >> 2) & 3) == 2) {
+            if ((header & 3) == 0) {
+                if (node.planes[1] != 0)
+                    boundingBox.pMin.x = node.planes[1];
+                if (node.planes[0] != 0)
+                    boundingBox.pMax.x = node.planes[0];
+            } else if ((header & 3) == 1) {
+                if (node.planes[1] != 0)
+                    boundingBox.pMin.y = node.planes[1];
+                if (node.planes[0] != 0)
+                    boundingBox.pMax.y = node.planes[0];
+            } else if ((header & 3) == 2) {
+                if (node.planes[1] != 0)
+                    boundingBox.pMin.z = node.planes[1];
+                if (node.planes[0] != 0)
+                    boundingBox.pMax.z = node.planes[0];
+            }
+        } else if (((header >> 2) & 3) == 0) {  // xy
+            if ((header & 3) == 0) {
+                if (node.planes[0] != 0)
+                    boundingBox.pMax.x = node.planes[0];
+                if (node.planes[1] != 0)
+                    boundingBox.pMax.y = node.planes[1];
+            } else if ((header & 3) == 1) {
+                if (node.planes[0] != 0)
+                    boundingBox.pMax.x = node.planes[0];
+                if (node.planes[1] != 0)
+                    boundingBox.pMin.y = node.planes[1];
+            } else if ((header & 3) == 2) {
+                if (node.planes[0] != 0)
+                    boundingBox.pMin.x = node.planes[0];
+                if (node.planes[1] != 0)
+                    boundingBox.pMax.y = node.planes[1];
+            } else if ((header & 3) == 3) {
+                if (node.planes[0] != 0)
+                    boundingBox.pMin.x = node.planes[0];
+                if (node.planes[1] != 0)
+                    boundingBox.pMin.y = node.planes[1];
+            }
+        } else if (((header >> 2) & 3) == 1) {  // xz
+            if ((header & 3) == 0) {
+                if (node.planes[0] != 0)
+                    boundingBox.pMax.x = node.planes[0];
+                if (node.planes[1] != 0)
+                    boundingBox.pMax.z = node.planes[1];
+            } else if ((header & 3) == 1) {
+                if (node.planes[0] != 0)
+                    boundingBox.pMax.x = node.planes[0];
+                if (node.planes[1] != 0)
+                    boundingBox.pMin.z = node.planes[1];
+            } else if ((header & 3) == 2) {
+                if (node.planes[0] != 0)
+                    boundingBox.pMin.x = node.planes[0];
+                if (node.planes[1] != 0)
+                    boundingBox.pMax.z = node.planes[1];
+            } else if ((header & 3) == 3) {
+                if (node.planes[0] != 0)
+                    boundingBox.pMin.x = node.planes[0];
+                if (node.planes[1] != 0)
+                    boundingBox.pMin.z = node.planes[1];
+            }
+        } else if (((header >> 2) & 3) == 3) {  // yz
+            if ((header & 3) == 0) {
+                if (node.planes[0] != 0)
+                    boundingBox.pMax.y = node.planes[0];
+                if (node.planes[1] != 0)
+                    boundingBox.pMax.z = node.planes[1];
+            } else if ((header & 3) == 1) {
+                if (node.planes[0] != 0)
+                    boundingBox.pMax.y = node.planes[0];
+                if (node.planes[1] != 0)
+                    boundingBox.pMin.z = node.planes[1];
+            } else if ((header & 3) == 2) {
+                if (node.planes[0] != 0)
+                    boundingBox.pMin.y = node.planes[0];
+                if (node.planes[1] != 0)
+                    boundingBox.pMax.z = node.planes[1];
+            } else if ((header & 3) == 3) {
+                if (node.planes[0] != 0)
+                    boundingBox.pMin.y = node.planes[0];
+                if (node.planes[1] != 0)
+                    boundingBox.pMin.z = node.planes[1];
+            }
+        }
+        if (node.IsLeaf()) {
+            if (((header >> 2) & 3) == 2) {
+                std::cout << out << "Single-Axis Carving Leaf with carved Bounding box: "
+                          << boundingBox.ToString() << '\n';
+            } else {
+                std::cout << out << "Dual-Axis Carving Leaf with carved Bounding box: "
+                          << boundingBox.ToString() << '\n';
+            }
+            for (unsigned i = node.triangleOffset;; i++) {
+                std::cout << out << "Primitive: " << i << "  "
+                          << primitives[i].Bounds().ToString() << '\n';
+                if (primitives[i].isLast()) {
+                    break;
+                }
+            }
+        } else {
+            if (((header >> 2) & 3) == 2)
+                std::cout << out << "Single-Axis Carving Node" << '\n';
+            else
+                std::cout << out << "Dual-Axis Carving Node" << '\n';
+            printWDST(*node.children[0], boundingBox, depth + 1);
+        }
+    } else {
+        std::cout << out << "Splitting Node" << '\n';
+        Bounds3f boundingBox1(boundingBox);
+        Bounds3f boundingBox2(boundingBox);
+        int size = header >> 2;
+        int axis = ((node.axes >> (2 * (size - 1))) & 3);
+        if (axis == 0) {
+            boundingBox1.pMax.x = node.planes[0];
+            boundingBox2.pMin.x = node.planes[1];
+        } else if (axis == 1) {
+            boundingBox1.pMax.y = node.planes[0];
+            boundingBox2.pMin.y = node.planes[1];
+        } else if (axis == 2) {
+            boundingBox1.pMax.z = node.planes[0];
+            boundingBox2.pMin.z = node.planes[1];
+        }
+        std::cout << out << boundingBox1.ToString() << '\n';
+        std::cout << out << boundingBox2.ToString() << '\n';
+        if ((header & 3) == 0) {
+            std::cout << out << "Size small" << '\n';
+            printWDST(*node.children[0], boundingBox1, depth + 1);
+            printWDST(*node.children[2], boundingBox2, depth + 1);
+        } else if ((header & 3) == 1) {
+            std::cout << out << "Size medium (right double)" << '\n';
+            int axis2 = node.axes & 3;
+            Bounds3f boundingBox21(boundingBox2);
+            Bounds3f boundingBox22(boundingBox2);
+            if (axis2 == 0) {
+                boundingBox21.pMax.x = node.planes[4];
+                boundingBox22.pMin.x = node.planes[5];
+            } else if (axis2 == 1) {
+                boundingBox21.pMax.y = node.planes[4];
+                boundingBox22.pMin.y = node.planes[5];
+            } else if (axis2 == 2) {
+                boundingBox21.pMax.z = node.planes[4];
+                boundingBox22.pMin.z = node.planes[5];
+            }
+            printWDST(*node.children[0], boundingBox1, depth + 1);
+            printWDST(*node.children[2], boundingBox21, depth + 1);
+            printWDST(*node.children[3], boundingBox22, depth + 1);
+        } else if ((header & 3) == 2) {
+            std::cout << out << "Size medium (left double)" << '\n';
+            int axis1 = node.axes & 3;
+            Bounds3f boundingBox11(boundingBox1);
+            Bounds3f boundingBox12(boundingBox1);
+            if (axis1 == 0) {
+                boundingBox11.pMax.x = node.planes[2];
+                boundingBox12.pMin.x = node.planes[3];
+            } else if (axis1 == 1) {
+                boundingBox11.pMax.y = node.planes[2];
+                boundingBox12.pMin.y = node.planes[3];
+            } else if (axis1 == 2) {
+                boundingBox11.pMax.z = node.planes[2];
+                boundingBox12.pMin.z = node.planes[3];
+            }
+            printWDST(*node.children[0], boundingBox11, depth + 1);
+            printWDST(*node.children[1], boundingBox12, depth + 1);
+            printWDST(*node.children[2], boundingBox2, depth + 1);
+        } else if ((header & 3) == 3) {
+            std::cout << out << "Size big" << '\n';
+            int axis1 = (node.axes >> 2) & 3;
+            Bounds3f boundingBox11(boundingBox1);
+            Bounds3f boundingBox12(boundingBox1);
+            if (axis1 == 0) {
+                boundingBox11.pMax.x = node.planes[2];
+                boundingBox12.pMin.x = node.planes[3];
+            } else if (axis1 == 1) {
+                boundingBox11.pMax.y = node.planes[2];
+                boundingBox12.pMin.y = node.planes[3];
+            } else if (axis1 == 2) {
+                boundingBox11.pMax.z = node.planes[2];
+                boundingBox12.pMin.z = node.planes[3];
+            }
+            int axis2 = (node.axes) & 3;
+            Bounds3f boundingBox21(boundingBox2);
+            Bounds3f boundingBox22(boundingBox2);
+            if (axis2 == 0) {
+                boundingBox21.pMax.x = node.planes[4];
+                boundingBox22.pMin.x = node.planes[5];
+            } else if (axis2 == 1) {
+                boundingBox21.pMax.y = node.planes[4];
+                boundingBox22.pMin.y = node.planes[5];
+            } else if (axis2 == 2) {
+                boundingBox21.pMax.z = node.planes[4];
+                boundingBox22.pMin.z = node.planes[5];
+            }
+            printWDST(*node.children[0], boundingBox11, depth + 1);
+            printWDST(*node.children[1], boundingBox12, depth + 1);
+            printWDST(*node.children[2], boundingBox21, depth + 1);
+            printWDST(*node.children[3], boundingBox22, depth + 1);
+        }
+    }
+}
 
 WDSTAggregate *WDSTAggregate::Create(std::vector<Primitive> prims,
                                      const ParameterDictionary &parameters) {
@@ -2589,7 +2866,7 @@ Bounds3f WDSTAggregate::Bounds() const {
 
 pstd::optional<ShapeIntersection> WDSTAggregate::Intersect(const Ray &ray,
                                                            Float globalTMax) const {
-    float delta = 0.001;
+    float delta = 0.f;  // 001;
     wdstRays++;
     wdstRays1++;
     pstd::optional<ShapeIntersection> si;
@@ -2603,12 +2880,12 @@ pstd::optional<ShapeIntersection> WDSTAggregate::Intersect(const Ray &ray,
 
     const Vector3f invDir = {1.f / ray.d.x, 1.f / ray.d.y, 1.f / ray.d.z};
     const int dirSgn[3] = {invDir[0] < 0, invDir[1] < 0, invDir[2] < 0};
-    if (globalBB.IntersectP(ray.o, ray.d, tMax, invDir, dirSgn))
+    if (!globalBB.IntersectP(ray.o, ray.d, tMax, invDir, dirSgn))
         return {};
     if (tMin < 0)
         tMin = 0;
 
-    StackItem *stack = new StackItem[maximumDepth];
+    StackItem *stack = new StackItem[(maximumDepth + 1) * 3 ];
     int stackPtr = -1;
 
     while (true) {
@@ -2627,17 +2904,18 @@ pstd::optional<ShapeIntersection> WDSTAggregate::Intersect(const Ray &ray,
             int childrenSize[] = {-1, -1, -1};
             for (int i = 0; i < amountOfChildren; i++) {
                 axes[i] = (headerOffset >> (24 - 2 * i)) & 0b11;
-                childrenSize[i] = (headerOffset >> (17 - 3 * i)) & 0b111;
+                childrenSize[i] = ((headerOffset >> (17 - 3 * i)) & 0b111) + 1;
             }
 
-            headerOffset = linearWDST[idx + 1];
             //amountOfChildren is one smaller than the actual amount of children for this SN, but this way it is half of the amount of planes stored in this SN
             std::vector<float> splitPlanes(amountOfChildren * 2);
-            for (int i = 0; i < amountOfChildren; i += 2) {
-                splitPlanes[i] = *reinterpret_cast<float *>(linearWDST[idx + 1 + i]);
-                splitPlanes[i + 1] = *reinterpret_cast<float *>(linearWDST[idx + 2 + i]);
+            for (int i = 0; i < amountOfChildren * 2; i += 2) {
+                uint32_t temp1 = linearWDST[idx + 2 + i];
+                splitPlanes[i] = *reinterpret_cast<float *>(&temp1);
+                uint32_t temp2 = linearWDST[idx + 3 + i];
+                splitPlanes[i + 1] = *reinterpret_cast<float *>(&temp2);
             }
-            idx = headerOffset & OFFSET;
+            idx = linearWDST[idx + 1];
 
             unsigned sign = dirSgn[axes[0]];
             float ts1 = (splitPlanes[sign] - ray.o[axes[0]]) * invDir[axes[0]];
@@ -2648,30 +2926,30 @@ pstd::optional<ShapeIntersection> WDSTAggregate::Intersect(const Ray &ray,
                 float tNext = std::max(tMin, ts2);
                 if (tMin <= ts1 + delta) {
                     std::list<StackItem> intersectedChildren;
-                    float localTMax = std::min(tMax, ts2);
-                    if ((whereDoubleChildren >> (sign ^ 1)) & 0b1) {
-                        unsigned axis = axes[1 + sign];
-                        unsigned internalSign = dirSgn[axis];
+                    float localTMax = std::min(tMax, ts1);
+                    if ((whereDoubleChildren >> (sign ^ 1)) & 0b1) { //if near area after first split is split again
+                        unsigned axis = axes[1 + sign * (amountOfChildren == 3)];
+                        unsigned localSign = dirSgn[axis];
                         int previousChildren = sign * ((whereDoubleChildren >> 1) + 1);
-                        float ts3 = (splitPlanes[2 + internalSign + sign * (amountOfChildren == 4)] - ray.o[axis]) * invDir[axis];
-                        float ts4 = (splitPlanes[2 + (internalSign ^ 1) + sign * (amountOfChildren == 4)] - ray.o[axis]) * invDir[axis];
+                        float ts3 = (splitPlanes[2 + localSign + 2 * sign * (amountOfChildren == 3)] - ray.o[axis]) * invDir[axis];
+                        float ts4 = (splitPlanes[2 + (localSign ^ 1) + 2 * sign * (amountOfChildren == 3)] - ray.o[axis]) * invDir[axis];
                         wdstPlaneIntersections += 2;
                         if (localTMax + delta >= ts4) {
                             float localTNext = std::max(tMin, ts4);
                             if (tMin <= ts3 + delta) {
                                 int localIdx1 = idx;
-                                int childIndex1 = previousChildren + internalSign;
+                                int childIndex1 = previousChildren + localSign;
                                 for (int i = 0; i < childIndex1; i++)
                                     localIdx1 += childrenSize[i];
                                 intersectedChildren.push_back(StackItem(localIdx1, tMin, std::min(localTMax, ts3)));
                                 int localIdx2 = idx;
-                                int childIndex2 = previousChildren + (internalSign ^ 1);
+                                int childIndex2 = previousChildren + (localSign ^ 1);
                                 for (int i = 0; i < childIndex2; i++)
                                     localIdx2 += childrenSize[i];
                                 intersectedChildren.push_back(StackItem(localIdx2, localTNext, localTMax));
                             } else {
                                 int localIdx = idx;
-                                int childIndex = previousChildren + (internalSign ^ 1);
+                                int childIndex = previousChildren + (localSign ^ 1);
                                 for (int i = 0; i < childIndex; i++)
                                     localIdx += childrenSize[i];
                                 intersectedChildren.push_back(StackItem(localIdx, localTNext, localTMax));
@@ -2679,7 +2957,7 @@ pstd::optional<ShapeIntersection> WDSTAggregate::Intersect(const Ray &ray,
                         } else {
                             if (tMin <= ts3 + delta) {
                                 int localIdx = idx;
-                                int childIndex = previousChildren + internalSign;
+                                int childIndex = previousChildren + localSign;
                                 for (int i = 0; i < childIndex; i++)
                                     localIdx += childrenSize[i];
                                 intersectedChildren.push_back(StackItem(localIdx, tMin, std::min(localTMax, ts3)));
@@ -2694,15 +2972,15 @@ pstd::optional<ShapeIntersection> WDSTAggregate::Intersect(const Ray &ray,
                     }
                     float localTMin = std::max(tMin, ts2);
                     if ((whereDoubleChildren >> sign) & 0b1) {
-                        unsigned axis = axes[1 + (sign ^ 1)];
+                        unsigned axis = axes[1 + (sign ^ 1) * (amountOfChildren == 3)];
                         unsigned internalSign = dirSgn[axis];
                         int previousChildren = (sign ^ 1) * ((whereDoubleChildren >> 1) + 1);
-                        float ts3 = (splitPlanes[2 + internalSign + (sign ^ 1) * (amountOfChildren == 4)] - ray.o[axis]) * invDir[axis];
-                        float ts4 = (splitPlanes[2 + (internalSign ^ 1) + (sign ^ 1) * (amountOfChildren == 4)] - ray.o[axis]) * invDir[axis];
+                        float ts3 = (splitPlanes[2 + internalSign + 2 * (sign ^ 1) * (amountOfChildren == 3)] - ray.o[axis]) * invDir[axis];
+                        float ts4 = (splitPlanes[2 + (internalSign ^ 1) + 2 * (sign ^ 1) * (amountOfChildren == 3)] - ray.o[axis]) * invDir[axis];
                         wdstPlaneIntersections += 2;
                         if (tMax + delta >= ts4) {
                             float localTNext = std::max(localTMin, ts4);
-                            if (tMin <= ts3 + delta) {
+                            if (localTMin <= ts3 + delta) {
                                 int localIdx1 = idx;
                                 int childIndex1 = previousChildren + internalSign;
                                 for (int i = 0; i < childIndex1; i++)
@@ -2736,7 +3014,6 @@ pstd::optional<ShapeIntersection> WDSTAggregate::Intersect(const Ray &ray,
                             localIdx += childrenSize[i];
                         intersectedChildren.push_back(StackItem(localIdx, tNext, tMax));
                     }
-
                     while (!intersectedChildren.empty()) {
                             stack[++stackPtr] = intersectedChildren.back();
                             intersectedChildren.pop_back();
@@ -2745,29 +3022,29 @@ pstd::optional<ShapeIntersection> WDSTAggregate::Intersect(const Ray &ray,
                 } else {
                     tMin = tNext;
                     if ((whereDoubleChildren >> sign) & 0b1) {
-                        unsigned axis = axes[1 + sign];
+                        unsigned axis = axes[1 + sign * (amountOfChildren == 3)];
                         unsigned internalSign = dirSgn[axis];
                         int previousChildren = (sign ^ 1) * ((whereDoubleChildren >> 1) + 1);
-                        float ts3 = (splitPlanes[2 + internalSign + (sign ^ 1) * (amountOfChildren == 4)] - ray.o[axis]) * invDir[axis];
-                        float ts4 = (splitPlanes[2 + (internalSign ^ 1) + (sign ^ 1) * (amountOfChildren == 4)] - ray.o[axis]) * invDir[axis];
+                        float ts3 = (splitPlanes[2 + internalSign + 2 * (sign ^ 1) * (amountOfChildren == 3)] - ray.o[axis]) * invDir[axis];
+                        float ts4 = (splitPlanes[2 + (internalSign ^ 1) + 2 * (sign ^ 1) * (amountOfChildren == 3)] - ray.o[axis]) * invDir[axis];
                         wdstPlaneIntersections += 2;
                         if (tMax + delta >= ts4) {
-                            float internalTNext = std::max(tMin, ts4);
+                            float localTNext = std::max(tMin, ts4);
                             if (tMin <= ts3 + delta) {
+                                int farChildIdx = idx;
                                 int childIndex1 = previousChildren + internalSign;
                                 for (int i = 0; i < childIndex1; i++)
                                     idx += childrenSize[i];
-                                int otherIdx = idx;
                                 int childIndex2 = previousChildren + (internalSign ^ 1);
                                 for (int i = 0; i < childIndex2; i++)
-                                    otherIdx += childrenSize[i];
-                                stack[++stackPtr] = StackItem(otherIdx, internalTNext, tMax);
+                                    farChildIdx += childrenSize[i];
+                                stack[++stackPtr] = StackItem(farChildIdx, localTNext, tMax);
                                 tMax = std::min(tMax, ts3);
                             } else {
                                 int childIndex = previousChildren + (internalSign ^ 1);
                                 for (int i = 0; i < childIndex; i++)
                                     idx += childrenSize[i];
-                                tMin = internalTNext;
+                                tMin = localTNext;
                             }
                             continue;
                         } else {
@@ -2775,7 +3052,7 @@ pstd::optional<ShapeIntersection> WDSTAggregate::Intersect(const Ray &ray,
                                 int childIndex = previousChildren + internalSign;
                                 for (int i = 0; i < childIndex; i++)
                                     idx += childrenSize[i];
-                                tMax = std::min(tMax, ts4);
+                                tMax = std::min(tMax, ts3);
                                 continue;
                             } else {
                                 goto pop;
@@ -2793,19 +3070,19 @@ pstd::optional<ShapeIntersection> WDSTAggregate::Intersect(const Ray &ray,
                 if (tMin <= ts1 + delta) {
                     tMax = std::min(tMax, ts1);
                     if ((whereDoubleChildren >> (sign ^ 1)) & 0b1) {
-                        unsigned axis = axes[1 + (sign ^ 1)];
+                        unsigned axis = axes[1 + (sign ^ 1) * (amountOfChildren == 3)];
                         unsigned internalSign = dirSgn[axis];
                         int previousChildren = sign * ((whereDoubleChildren >> 1) + 1);
-                        float ts3 = (splitPlanes[2 + internalSign + sign * (amountOfChildren == 4)] - ray.o[axis]) * invDir[axis];
-                        float ts4 = (splitPlanes[2 + (internalSign ^ 1) +  sign * (amountOfChildren == 4)] - ray.o[axis]) * invDir[axis];
+                        float ts3 = (splitPlanes[2 + internalSign + 2 * sign * (amountOfChildren == 3)] - ray.o[axis]) * invDir[axis];
+                        float ts4 = (splitPlanes[2 + (internalSign ^ 1) + 2 * sign * (amountOfChildren == 3)] - ray.o[axis]) * invDir[axis];
                         wdstPlaneIntersections += 2;
                         if (tMax + delta >= ts4) {
                             float internalTNext = std::max(tMin, ts4);
                             if (tMin <= ts3 + delta) {
+                                int otherIdx = idx;
                                 int childIndex1 = previousChildren + internalSign;
                                 for (int i = 0; i < childIndex1; i++)
                                     idx += childrenSize[i];
-                                int otherIdx = idx;
                                 int childIndex2 = previousChildren + (internalSign ^ 1);
                                 for (int i = 0; i < childIndex2; i++)
                                     otherIdx += childrenSize[i];
@@ -2823,7 +3100,7 @@ pstd::optional<ShapeIntersection> WDSTAggregate::Intersect(const Ray &ray,
                                 int childIndex = previousChildren + internalSign;
                                 for (int i = 0; i < childIndex; i++)
                                     idx += childrenSize[i];
-                                tMax = std::min(tMax, ts4);
+                                tMax = std::min(tMax, ts3);
                                 continue;
                             } else {
                                 goto pop;
@@ -2842,10 +3119,12 @@ pstd::optional<ShapeIntersection> WDSTAggregate::Intersect(const Ray &ray,
             }
         } else { //Hier nur CN oder CL
             float carvePlanes[2];
-            carvePlanes[0] = *reinterpret_cast<float *>(linearWDST[idx + 1]);
-            carvePlanes[1] = *reinterpret_cast<float *>(linearWDST[idx + 2]);
+            uint32_t temp1 = linearWDST[idx + 1];
+            carvePlanes[0] = *reinterpret_cast<float *>(&temp1);
+            uint32_t temp2 = linearWDST[idx + 2];
+            carvePlanes[1] = *reinterpret_cast<float *>(&temp2);
 
-            char carveType1 = header5 >> 2 & 3;
+            char carveType1 = (header5 >> 2) & 3;
             char carveType2 = header5 & 3;
 
             if (carveType1 == 2) {
@@ -2910,9 +3189,6 @@ pstd::optional<ShapeIntersection> WDSTAggregate::Intersect(const Ray &ray,
                 si = primSi;
                 tMax = si->tHit;
             }
-            //TODO: isLast is not actively set for primitives of WDST yet, but it is set for primitives of DST
-            //      as the leafs and their primitives are identical for WDST and DST isLast dos not have to be determined
-            //      again for WDST, instead I can just use primitives of DST. (maybe I have to set it manualy)
             if (primitives[i].isLast()) {
                 break;
             }
@@ -2925,7 +3201,10 @@ pstd::optional<ShapeIntersection> WDSTAggregate::Intersect(const Ray &ray,
             StackItem item = stack[stackPtr--];
             idx = item.idx;
             tMin = item.tMin;
-            if (!si.has_value() || tMin < si->tHit) {
+            if (!si.has_value()) {
+                tMax = item.tMax;
+                break;
+            } else if (tMin < si->tHit) {
                 tMax = std::min(si->tHit, item.tMax);
                 break;
             }
@@ -3321,7 +3600,7 @@ int WDSTAggregate::reconstructTree(int index) {
 
 WDSTBuildNode *WDSTAggregate::BuildWDSTRecursively(
     ThreadLocal<Allocator> &threadAllocators, DSTBuildNode *splittingNode, float S, int currentDepth) {
-    Allocator alloc = threadAllocators.Get();
+     Allocator alloc = threadAllocators.Get();
     WDSTBuildNode *node = alloc.new_object<WDSTBuildNode>();
 
     if (splittingNode->IsLeaf()) {
@@ -3336,6 +3615,10 @@ WDSTBuildNode *WDSTAggregate::BuildWDSTRecursively(
     node->axes = splittingNode->GetSplittingPlanesAxis();
     node->boundingBox = splittingNode->GetBB();
     node->depthLevel = currentDepth;
+    node->header;
+
+    if (node->offset == 57 || node->offset == 131)
+        int i = 0;
 
     DSTBuildNode *firstUnderlyingSN = getNextRelevantNode(splittingNode->children[0]);
     DSTBuildNode *secondUnderlyingSN = getNextRelevantNode(splittingNode->children[1]);
@@ -3361,11 +3644,11 @@ WDSTBuildNode *WDSTAggregate::BuildWDSTRecursively(
         WDSTBuildNode *child1 = determineCNConstelation(
             threadAllocators, doubleSplitBB1, nextNode, S,
             currentDepth + 1, &SAH);
-        overallSAHCost += SAH;
+        overallSAHCost += SAH * 1000000;
         WDSTBuildNode *lowerEnd = getLowerEnd(child1);
         if (child1 == NULL) { //If there is a SN directly after the parent SN in the WDST
             node->children[0] = BuildWDSTRecursively(threadAllocators, nextNode, firstUnderlyingSN->GetBB().SurfaceArea(), currentDepth + 1);
-        } else if (lowerEnd == NULL) { //If there is no more SN in the subtree of child1 of the parent SN
+        } else if (lowerEnd == NULL || lowerEnd->IsLeaf()) { //If there is no more SN in the subtree of child1 of the parent SN
             node->children[0] = child1;
         } else { //If there are one to three CN between the SN and the parent SN in the WDST
             lowerEnd->children[0] = BuildWDSTRecursively(threadAllocators, nextNode, lowerEnd->boundingBox.SurfaceArea(), lowerEnd->depthLevel + 1);
@@ -3376,13 +3659,13 @@ WDSTBuildNode *WDSTAggregate::BuildWDSTRecursively(
         WDSTBuildNode *child2 = determineCNConstelation(
             threadAllocators, doubleSplitBB2, nextNode, S,
             currentDepth + 1, &SAH);
-        overallSAHCost += SAH;
+        overallSAHCost += SAH * 1000000;
         lowerEnd = getLowerEnd(child2);
         if (child2 == NULL) {  
             node->children[1] = BuildWDSTRecursively(
                 threadAllocators, nextNode, firstUnderlyingSN->GetBB().SurfaceArea(),
                 currentDepth + 1);
-        } else if (lowerEnd == NULL) {
+        } else if (lowerEnd == NULL || lowerEnd->IsLeaf()) {
             node->children[1] = child2;
         } else {
             lowerEnd->children[0] = BuildWDSTRecursively(
@@ -3412,13 +3695,13 @@ WDSTBuildNode *WDSTAggregate::BuildWDSTRecursively(
         WDSTBuildNode *child1 = determineCNConstelation(
             threadAllocators, doubleSplitBB3, nextNode, S,
             currentDepth + 1, &SAH);
-        overallSAHCost += SAH;
+        overallSAHCost += SAH * 1000000;
         WDSTBuildNode *lowerEnd = getLowerEnd(child1);
         if (child1 == NULL) {
             node->children[2] = BuildWDSTRecursively(
                 threadAllocators, nextNode, firstUnderlyingSN->GetBB().SurfaceArea(),
                 currentDepth + 1);
-        } else if (lowerEnd == NULL) {
+        } else if (lowerEnd == NULL || lowerEnd->IsLeaf()) {
             node->children[2] = child1;
         } else {
             lowerEnd->children[0] = BuildWDSTRecursively(
@@ -3431,13 +3714,13 @@ WDSTBuildNode *WDSTAggregate::BuildWDSTRecursively(
         WDSTBuildNode *child2 = determineCNConstelation(
             threadAllocators, doubleSplitBB4, nextNode, S,
             currentDepth + 1, &SAH);
-        overallSAHCost += SAH;
+        overallSAHCost += SAH * 1000000;
         lowerEnd = getLowerEnd(child2);
         if (child2 == NULL) {
             node->children[3] = BuildWDSTRecursively(
                 threadAllocators, nextNode, firstUnderlyingSN->GetBB().SurfaceArea(),
                 currentDepth + 1);
-        } else if (lowerEnd == NULL) {
+        } else if (lowerEnd == NULL || lowerEnd->IsLeaf()) {
             node->children[3] = child2;
         } else {
             lowerEnd->children[0] = BuildWDSTRecursively(
@@ -3450,6 +3733,13 @@ WDSTBuildNode *WDSTAggregate::BuildWDSTRecursively(
             threadAllocators, *splittingNode->children[1], currentDepth + 1);
         node->children[2] = child;
     }
+    node->header = 0b001000;
+    if (node->children[1] != NULL) {
+        node->header = node->header + 0b001100;
+    }
+    if (node->children[3] != NULL) {
+        node->header = node->header + 0b001010;
+    }
     return node;
 }
 
@@ -3458,20 +3748,19 @@ void WDSTAggregate::FlattenWDST(WDSTBuildNode *node) {
     if (node == NULL)
         return;
     uint32_t offset = node->offset;
-    if (node->IsLeaf()) {
-        linearWDST[offset] = node->header << 26 | node->triangleOffset;
-        numberOfLeafs++;
-    } else if (node->IsCarving()){
+    if (node->IsCarving()){
         uint32_t flag = node->header << 26;
         flag |= node->offsetToFirstChild();
         linearWDST[offset] = flag;
-        linearWDST[offset + 1] = node->planes[0];
-        linearWDST[offset + 2] = node->planes[1];
+        linearWDST[offset + 1] = node->PlaneAsInt(0);
+        linearWDST[offset + 2] = node->PlaneAsInt(1);
         if (node->children[0] != NULL)
             FlattenWDST(node->children[0]);
         numberOfCarvingNodes++;
-    }
-    else {
+    } else if (node->IsLeaf()) {
+        linearWDST[offset] = node->header << 26 | node->triangleOffset;
+        numberOfLeafs++;
+    } else {
         int header = 8;
         if (node->children[1] != NULL)
             header += 12;
@@ -3481,22 +3770,25 @@ void WDSTAggregate::FlattenWDST(WDSTBuildNode *node) {
         int j = 0;
         for (int i = 0; i < 3 && j < 3; i++) {
             if (node->children[i] != NULL) {
-                childrenSize += node->children[i]->size() << (6 - 3 * j);
+                childrenSize = childrenSize << 3;
+                childrenSize += node->children[i]->size();
                 j++;
             }
         }
-        uint32_t axes = node->axes;
         for (int i = j; i < 3; i++) {
-            axes << 2;
-            childrenSize << 3;
+            childrenSize = childrenSize << 3;
+        }
+        uint32_t axes = node->axes;
+        for (int i = (header >> 3); i < 3; i++) {
+            axes = axes << 2;
         }
         linearWDST[offset] = (header << 26) + (axes << 20) + (childrenSize << 11);
         linearWDST[offset + 1] = node->children[0]->offset;
         j = 2;
         for (int i = 0; i < 6; i += 2) {
             if (node->planes[i] != 0) {
-                linearWDST[offset + j] = node->planes[i];
-                linearWDST[offset + j + 1] = node->planes[i + 1];
+                linearWDST[offset + j] = node->PlaneAsInt(i);
+                linearWDST[offset + j + 1] = node->PlaneAsInt(i + 1);
                 j += 2;
             }
         }
@@ -3636,14 +3928,16 @@ WDSTBuildNode *WDSTAggregate::getThreeCarvingNodes(
                 header = 0b110000 | (firstSideToCarve - 1) << 1;
                 SAH += (parentBB.SurfaceArea() / S) * 0.3f;
             } else {
-                header = 0b100000 | ((firstSideToCarve + secondSideToCarve) % 3) << 3;
+                int carveType1 = ((firstSideToCarve + secondSideToCarve) % 3);
+                if (carveType1 == 2)
+                    carveType1++;
+                header = 0b100000 | (carveType1 << 3);
                 header |= (2 * (firstSideToCarve < 4) + (secondSideToCarve < 4)) << 1;
                 SAH += (parentBB.SurfaceArea() / S) * 0.5f;
             }
 
-            node->InitExistingCarving(planes[0], planes[1], getTwoCarvingNodes(threadAllocators, sidesToCarveCopy, carvedParentBB,
-                                   nextRelevantDSTNode, &SAH, S, currentDepth + 1),
-                header, 0, parentBB, currentDepth);
+            node->InitNewCarving(planes[0], planes[1], getTwoCarvingNodes(threadAllocators, sidesToCarveCopy, carvedParentBB,
+                                   nextRelevantDSTNode, &SAH, S, currentDepth + 1), header, 0, parentBB, currentDepth);
             
             if(SAH < bestSAH) {
                 bestSAH = SAH;
@@ -3689,13 +3983,16 @@ WDSTBuildNode *WDSTAggregate::getTwoCarvingNodes(ThreadLocal<Allocator> &threadA
                 header = 0b110000 | (firstSideToCarve - 1) << 1;
                 SAH += (parentBB.SurfaceArea() / S) * 0.3f;
             } else {
-                header = 0b100000 | ((firstSideToCarve + secondSideToCarve) % 3) << 3;
+                int carveType1 = ((firstSideToCarve + secondSideToCarve) % 3);
+                if (carveType1 == 2)
+                    carveType1++;
+                header = 0b100000 | (carveType1 << 3);
                 header |= (2 * (firstSideToCarve < 4) + (secondSideToCarve < 4)) << 1;
                 SAH += (parentBB.SurfaceArea() / S) * 0.5f;
             }
 
-            node->InitExistingCarving(planes[0], planes[1],
-                getOneCarvingNode(threadAllocators, sidesToCarveCopy, carvedParentBB, nextRelevantDSTNode, &SAH, S, currentDepth + 1), header, 0, parentBB, currentDepth);
+            node->InitNewCarving( planes[0], planes[1], getOneCarvingNode(threadAllocators, sidesToCarveCopy, carvedParentBB,
+                nextRelevantDSTNode, &SAH, S, currentDepth + 1), header, 0, parentBB, currentDepth);
 
             if (SAH < bestSAH) {
                 bestSAH = SAH;
@@ -3725,8 +4022,11 @@ WDSTBuildNode *WDSTAggregate::getOneCarvingNode(ThreadLocal<Allocator> &threadAl
     Bounds3f carvedParentBB =
         carve(parentBB, nextRelevantDSTNode->GetBB(), sidesToCarve, planes);
     int header;
+    bool swapPlanes = false;
     if (secondSideToCarve == 0 || secondSideToCarve - firstSideToCarve == 3) {
-        header = 0b110000 | (firstSideToCarve - 1) << 1;
+        if (secondSideToCarve == 0 && firstSideToCarve > 3)
+            swapPlanes = true;
+        header = 0b110000 | ((firstSideToCarve - 1) % 3) << 1;
         *SAH += (parentBB.SurfaceArea() / S) * 0.3f;
     } else {
         if ((firstSideToCarve - 1) % 3 > (secondSideToCarve - 1) % 3) {
@@ -3734,17 +4034,25 @@ WDSTBuildNode *WDSTAggregate::getOneCarvingNode(ThreadLocal<Allocator> &threadAl
             firstSideToCarve = secondSideToCarve;
             secondSideToCarve = temp;
         }
-        header = 0b100000 | ((firstSideToCarve + secondSideToCarve) % 3) << 3;
+        int carveType1 = ((firstSideToCarve + secondSideToCarve) % 3);
+        if (carveType1 == 2)
+            carveType1++;
+        header = 0b100000 | (carveType1 << 3);
         header |= (2 * (firstSideToCarve < 4) + (secondSideToCarve < 4)) << 1;
         *SAH += (parentBB.SurfaceArea() / S) * 0.5f;
     }
     
+    if (swapPlanes) {
+        float temp = planes[0];
+        planes[0] = planes[1];
+        planes[1] = temp;
+    }
     if (nextRelevantDSTNode->IsLeaf() || nextRelevantDSTNode->isCarvingLeaf()) {
         header |= 1;
-        node->InitExistingCarving(planes[0], planes[1], NULL, header, nextRelevantDSTNode->offsetToFirstChild(), parentBB, currentDepth);
+        node->InitNewCarving(planes[0], planes[1], NULL, header, nextRelevantDSTNode->offsetToFirstChild(), parentBB, currentDepth);
         *SAH += (carvedParentBB.SurfaceArea() / S) * nextRelevantDSTNode->NTriangles();
     } else {
-        node->InitExistingCarving(planes[0], planes[1], NULL, header, 0, parentBB, currentDepth);
+        node->InitNewCarving(planes[0], planes[1], NULL, header, 0, parentBB, currentDepth);
     }
     if (currentDepth > maximumDepth)
         maximumDepth++;

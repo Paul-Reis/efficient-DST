@@ -189,6 +189,7 @@ class WDSTAggregate {
     bool IntersectP(const Ray &ray, Float tMax) const;
 
   private:
+    void printWDST(WDSTBuildNode node, Bounds3f boundingBox, int depth);
     static int reconstructTree(int index);
     WDSTBuildNode *BuildWDSTRecursively(ThreadLocal<Allocator> &threadAllocators, DSTBuildNode *splittingNode, float S, int currentDepth);
     void FlattenWDST(WDSTBuildNode *node);
