@@ -160,20 +160,24 @@ class StackItem {
 };
 
 float determineSAH(std::vector<int> &nodeComposition, std::vector<float> &nodesPlanes, std::vector<Bounds3f> &nodesBounds, 
-                   Bounds3f parentBB, Bounds3f childBB, int positionOfNextNode, float S);
+                   Bounds3f parentBB,
+                   Bounds3f childBB, int positionOfNextNode, float S,
+                   LinearBVHNode *nodes, int currentNodeIndex);
 float carveFiveSides(const std::vector<int> sidesToCarve,
                      std::vector<int> &nodeComposition,
                       std::vector<float> &nodesPlanes, std::vector<Bounds3f> &nodesBounds,
-                     int positionOfNextNode, float S, float Sn, Bounds3f parentBB,
-                     Bounds3f childBB);
+                     int positionOfNextNode, float S, float Sn, Bounds3f parentBB, Bounds3f childBB, LinearBVHNode *nodes,
+                     int currentNodeIndex);
 float carveThreeOrFourSides(const std::vector<int> sidesToCarve,
                             std::vector<int> &nodeComposition,
                             std::vector<float> &nodesPlanes,
                             std::vector<Bounds3f> &nodesBounds, int positionOfNextNode,
-                            float S, float Sn, Bounds3f parentBB, Bounds3f childBB);
+                            float S, float Sn, Bounds3f parentBB, Bounds3f childBB,
+                            LinearBVHNode *nodes, int currentNodeIndex);
 float carveOneOrTwoSides(std::vector<int> sidesToCarve, std::vector<int> &nodeComposition,
                          std::vector<float> &nodesPlanes, int positionOfNextNode, float S,
-                         float Sn, Bounds3f parentBB, Bounds3f childBB);
+                         float Sn, Bounds3f parentBB, Bounds3f childBB,
+                         LinearBVHNode *nodes, int currentNodeIndex);
 
 struct WDSTBuildNode;
 
@@ -227,6 +231,10 @@ class WDSTAggregate {
 
 Bounds3f carve(Bounds3f parentBB, Bounds3f childBB, std::vector<int> sidesToCarve,
                std::vector<float> &planes);
+
+int getNTrianglesInSubTree(LinearBVHNode *nodes, int currentNodeIndex);
+
+int getNTrianglesInSubTree(DSTBuildNode node);
 
 }  // namespace pbrt
 

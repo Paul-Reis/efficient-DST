@@ -1375,7 +1375,7 @@ struct DSTBuildNode {
     Bounds3f GetBB() const {
         return BoundingBox; }
     int NTriangles() const { return nTriangles; }
-    bool isCarvingLeaf() const { return IsCarving() && flags & IS_LEAF; }
+    bool isCarvingLeaf() const { return IsCarving() && (flags & IS_LEAF); }
 
     DSTBuildNode* children[2] = {NULL, NULL};
     float plane1 = NULL;
@@ -2054,11 +2054,13 @@ DSTBuildNode *DSTAggregate::BuildRecursiveFromBVH(ThreadLocal<Allocator> &thread
         nodesBB[1] = rightChildBounds;
         float sumSAH;
         if (switchChildrenLocal)
-            sumSAH = determineSAH(nodeComposition, nodesPlanes, nodesBB, leftChildBounds, rightChildNodeBVH.bounds, 0, parentBounds.SurfaceArea()) +
-            determineSAH(nodeComposition, nodesPlanes, nodesBB, rightChildBounds, leftChildNodeBVH.bounds, 6, parentBounds.SurfaceArea());
+            sumSAH = determineSAH(nodeComposition, nodesPlanes, nodesBB, leftChildBounds, rightChildNodeBVH.bounds, 0, parentBounds.SurfaceArea(), nodes, parentNodeBVH.secondChildOffset) +
+                     determineSAH(nodeComposition, nodesPlanes, nodesBB, rightChildBounds,
+                                  leftChildNodeBVH.bounds, 6, parentBounds.SurfaceArea(),
+                                  nodes, currentDepth + 1);
         else
-            sumSAH = determineSAH(nodeComposition, nodesPlanes, nodesBB, leftChildBounds, leftChildNodeBVH.bounds, 0, parentBounds.SurfaceArea()) +
-                determineSAH(nodeComposition, nodesPlanes, nodesBB, rightChildBounds, rightChildNodeBVH.bounds, 6, parentBounds.SurfaceArea());
+            sumSAH = determineSAH(nodeComposition, nodesPlanes, nodesBB, leftChildBounds, leftChildNodeBVH.bounds, 0, parentBounds.SurfaceArea(), nodes, currentDepth + 1) +
+                determineSAH(nodeComposition, nodesPlanes, nodesBB, rightChildBounds, rightChildNodeBVH.bounds, 6, parentBounds.SurfaceArea(), nodes, parentNodeBVH.secondChildOffset);
         if (sumSAH < bestSAH) {
             switchChildren = switchChildrenLocal;
             bestNodeComposition = nodeComposition;
@@ -2231,8 +2233,9 @@ DSTBuildNode *DSTAggregate::BuildRecursiveFromBVH(ThreadLocal<Allocator> &thread
     return node;
 }
 
-float determineSAH(std::vector<int> &nodeComposition, std::vector<float> &nodesPlanes, std::vector<Bounds3f> &nodesBB, Bounds3f parentBB,
-                   Bounds3f childBB, int positionOfNextNode, float S) {
+float determineSAH(std::vector<int> &nodeComposition, std::vector<float> &nodesPlanes, std::vector<Bounds3f> &nodesBB, Bounds3f parentBB, Bounds3f childBB,
+                   int positionOfNextNode, float S, LinearBVHNode *nodes,
+                   int currentNodeIndex) {
     std::vector<int> sidesToCarve;
     float delta = 0.0001;
     //sides to carve must be ordered first by x,y,z and then by min, max
@@ -2252,22 +2255,22 @@ float determineSAH(std::vector<int> &nodeComposition, std::vector<float> &nodesP
     if (sidesToCarve.size() >= 5) {
         SAH =
             carveFiveSides(sidesToCarve, nodeComposition, nodesPlanes, nodesBB, positionOfNextNode,
-                           S,
-                             parentBB.SurfaceArea(), parentBB, childBB);
+                           S, parentBB.SurfaceArea(), parentBB, childBB, nodes, currentNodeIndex);
     } else if (sidesToCarve.size() >= 3) {
         SAH = carveThreeOrFourSides(sidesToCarve, nodeComposition,
-                                    nodesPlanes, nodesBB, positionOfNextNode, S,
-                                    parentBB.SurfaceArea(), parentBB, childBB);
+                                    nodesPlanes, nodesBB, positionOfNextNode, S, parentBB.SurfaceArea(),
+                                    parentBB, childBB, nodes, currentNodeIndex);
     } else if (sidesToCarve.size() >= 1) {
-        SAH = carveOneOrTwoSides(sidesToCarve, nodeComposition, nodesPlanes, positionOfNextNode,
-                           S, parentBB.SurfaceArea(), parentBB, childBB);
+        SAH = carveOneOrTwoSides(sidesToCarve, nodeComposition, nodesPlanes, positionOfNextNode, S, parentBB.SurfaceArea(), parentBB,
+                                 childBB, nodes, currentNodeIndex);
     }
     return SAH;
 }
 
 float carveOneOrTwoSides(std::vector<int> sidesToCarve, std::vector<int> &nodeComposition,
                          std::vector<float> &nodesPlanes, int positionOfNextNode, float S,
-                         float Sn, Bounds3f parentBB, Bounds3f childBB) {
+                         float Sn, Bounds3f parentBB, Bounds3f childBB,
+                         LinearBVHNode *nodes, int currentNodeIndex) {
     //1=xmin, 2=ymin, 3=zmin, 4=xmax, 5=ymax, 6=zmax, 0=noMoreCut
     int firstSideToCarve = sidesToCarve[0];
     int secondSideToCarve = 0;
@@ -2295,7 +2298,7 @@ float carveOneOrTwoSides(std::vector<int> sidesToCarve, std::vector<int> &nodeCo
             nodesPlanes[positionOfNextNode + 1] = nodesPlanes[positionOfNextNode];
             nodesPlanes[positionOfNextNode] = NULL;
         }
-        return 0.3 * (Sn / S);
+        return 0.3 * (Sn / S) + (carvedBB.SurfaceArea() / S) * getNTrianglesInSubTree(nodes, currentNodeIndex);
     }
     if (firstSideToCarve % 3 == 1 && secondSideToCarve % 3 == 2) { //xy
         nodeComposition[positionOfNextNode] = 1; // we want 0 but we set value +1 so default can be 0
@@ -2307,14 +2310,15 @@ float carveOneOrTwoSides(std::vector<int> sidesToCarve, std::vector<int> &nodeCo
         nodeComposition[positionOfNextNode] = 4; //3 is for single-axis CN therefore 4
         nodeComposition[positionOfNextNode + 1] = 2 * (firstSideToCarve < 4) + (secondSideToCarve < 4);
     }
-    return 0.5 * (Sn / S);
+    return 0.5 * (Sn / S) + (carvedBB.SurfaceArea() / S) * getNTrianglesInSubTree(nodes, currentNodeIndex);
 }
 
 float carveThreeOrFourSides(const std::vector<int> sidesToCarve,
                             std::vector<int> &nodeComposition,
                             std::vector<float> &nodesPlanes,
                             std::vector<Bounds3f> &nodesBB, int positionOfNextNode,
-                            float S, float Sn, Bounds3f parentBB, Bounds3f childBB) {
+                            float S, float Sn, Bounds3f parentBB, Bounds3f childBB,
+                            LinearBVHNode *nodes, int currentNodeIndex) {
     float bestSAH = FLT_MAX;
     std::vector<int> bestNodeComposition = nodeComposition;
     std::vector<float> bestNodePlanes = nodesPlanes;
@@ -2343,7 +2347,8 @@ float carveThreeOrFourSides(const std::vector<int> sidesToCarve,
                 float SAH = 0.3 * (Sn / S) +
                             carveOneOrTwoSides(sidesToCarveCopy, nodeCompositionCopy,
                                                nodesPlanesCopy, positionOfNextNode + 2, S,
-                                               SnCarved, carvedBB, childBB);
+                                               SnCarved, carvedBB, childBB, nodes,
+                                               currentNodeIndex);
                 if (SAH < bestSAH) {
                     bestNodeComposition = nodeCompositionCopy;
                     bestNodePlanes = nodesPlanesCopy;
@@ -2364,7 +2369,8 @@ float carveThreeOrFourSides(const std::vector<int> sidesToCarve,
                 float SAH = 0.5 * (Sn / S) +
                             carveOneOrTwoSides(sidesToCarveCopy, nodeCompositionCopy,
                                                nodesPlanesCopy, positionOfNextNode + 2, S,
-                                               SnCarved, carvedBB, childBB);
+                                               SnCarved, carvedBB, childBB, nodes,
+                                               currentNodeIndex);
                 if (SAH < bestSAH) {
                     bestNodeComposition = nodeCompositionCopy;
                     bestNodePlanes = nodesPlanesCopy;
@@ -2383,8 +2389,8 @@ float carveThreeOrFourSides(const std::vector<int> sidesToCarve,
 float carveFiveSides(const std::vector<int> sidesToCarve,
                      std::vector<int> &nodeComposition, std::vector<float> &nodesPlanes,
                      std::vector<Bounds3f> &nodesBB,
-                     int positionOfNextNode, float S, float Sn, Bounds3f parentBB,
-                     Bounds3f childBB) {
+                     int positionOfNextNode, float S, float Sn, Bounds3f parentBB, Bounds3f childBB, LinearBVHNode *nodes,
+                     int currentNodeIndex) {
     float bestSAH = FLT_MAX;
     std::vector<int> bestNodeComposition = nodeComposition;
     std::vector<float> bestNodePlanes = nodesPlanes;
@@ -2412,8 +2418,8 @@ float carveFiveSides(const std::vector<int> sidesToCarve,
                 nodeCompositionCopy[positionOfNextNode + 1] = firstSideToCarve - 1;
                 float SAH = 0.3 * (Sn / S) +
                             carveThreeOrFourSides(sidesToCarveCopy, nodeCompositionCopy,
-                                                  nodesPlanesCopy, nodesBBCopy, positionOfNextNode + 2,
-                                                  S, SnCarved, carvedBB, childBB);
+                                                  nodesPlanesCopy, nodesBBCopy, positionOfNextNode + 2, S, SnCarved,
+                                carvedBB, childBB, nodes, currentNodeIndex);
                 if (SAH < bestSAH) {
                     bestNodeComposition = nodeCompositionCopy;
                     bestNodePlanes = nodesPlanesCopy;
@@ -2434,8 +2440,8 @@ float carveFiveSides(const std::vector<int> sidesToCarve,
                 float SAH = 0.5 * (Sn / S) +
                             carveThreeOrFourSides(sidesToCarveCopy, nodeCompositionCopy,
                                                   nodesPlanesCopy, nodesBBCopy,
-                                                  positionOfNextNode + 2,
-                                                  S, SnCarved, carvedBB, childBB);
+                                                  positionOfNextNode + 2, S, SnCarved,
+                                carvedBB, childBB, nodes, currentNodeIndex);
                 if (SAH < bestSAH) {
                     bestNodeComposition = nodeCompositionCopy;
                     bestNodePlanes = nodesPlanesCopy;
@@ -2477,6 +2483,40 @@ Bounds3f carve(Bounds3f parentBB, Bounds3f childBB, std::vector<int> sidesToCarv
         i++;
     }
     return carvedBB;
+}
+
+int getNTrianglesInSubTree(LinearBVHNode *nodes, int currentNodeIndex) {
+    LinearBVHNode parentNode = nodes[currentNodeIndex];
+    LinearBVHNode leftChildNode = nodes[currentNodeIndex + 1];
+    LinearBVHNode rightChildNode = nodes[parentNode.secondChildOffset];
+    int nTriangles = 0;
+    if (leftChildNode.nPrimitives) {
+        nTriangles += leftChildNode.nPrimitives;
+    } else {
+        nTriangles += getNTrianglesInSubTree(nodes, currentNodeIndex + 1);
+    }
+    if (rightChildNode.nPrimitives) {
+        nTriangles += rightChildNode.nPrimitives;
+    } else {
+        nTriangles += getNTrianglesInSubTree(nodes, parentNode.secondChildOffset);
+    }
+    return nTriangles;
+}
+
+int getNTrianglesInSubTree(DSTBuildNode node) {
+    int nTriangles = 0;
+    if (node.IsLeaf()) {
+        nTriangles += node.NTriangles();
+    } else if (node.IsCarving()) {
+        if (node.isCarvingLeaf())
+            nTriangles += node.NTriangles();
+        else
+            nTriangles += getNTrianglesInSubTree(*node.children[0]);
+    } else {
+        nTriangles += getNTrianglesInSubTree(*node.children[0]);
+        nTriangles += getNTrianglesInSubTree(*node.children[1]);
+    }
+    return nTriangles;
 }
 
 void DSTAggregate::addNodeToDepthList(DSTBuildNode* node) {
@@ -2866,7 +2906,7 @@ Bounds3f WDSTAggregate::Bounds() const {
 
 pstd::optional<ShapeIntersection> WDSTAggregate::Intersect(const Ray &ray,
                                                            Float globalTMax) const {
-    float delta = 0.f;  // 001;
+    float delta = 0.001;
     wdstRays++;
     wdstRays1++;
     pstd::optional<ShapeIntersection> si;
@@ -4027,7 +4067,7 @@ WDSTBuildNode *WDSTAggregate::getOneCarvingNode(ThreadLocal<Allocator> &threadAl
         if (secondSideToCarve == 0 && firstSideToCarve > 3)
             swapPlanes = true;
         header = 0b110000 | ((firstSideToCarve - 1) % 3) << 1;
-        *SAH += (parentBB.SurfaceArea() / S) * 0.3f;
+        *SAH += (parentBB.SurfaceArea() / S) * 0.3f + (carvedParentBB.SurfaceArea() / S) * getNTrianglesInSubTree(*nextRelevantDSTNode);
     } else {
         if ((firstSideToCarve - 1) % 3 > (secondSideToCarve - 1) % 3) {
             int temp = firstSideToCarve;
@@ -4039,7 +4079,7 @@ WDSTBuildNode *WDSTAggregate::getOneCarvingNode(ThreadLocal<Allocator> &threadAl
             carveType1++;
         header = 0b100000 | (carveType1 << 3);
         header |= (2 * (firstSideToCarve < 4) + (secondSideToCarve < 4)) << 1;
-        *SAH += (parentBB.SurfaceArea() / S) * 0.5f;
+        *SAH += (parentBB.SurfaceArea() / S) * 0.5f + (carvedParentBB.SurfaceArea() / S) * getNTrianglesInSubTree(*nextRelevantDSTNode);
     }
     
     if (swapPlanes) {
