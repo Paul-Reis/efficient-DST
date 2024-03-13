@@ -31,6 +31,9 @@ STAT_COUNTER("BVH/Interior nodes", interiorNodes);
 STAT_COUNTER("BVH/Leaf nodes", leafNodes);
 STAT_COUNTER("SAH/BVH Cost * 1000000", bvhOverallSAHCost);//TODO: count SAH
 STAT_PIXEL_COUNTER("BVH/Nodes visited", bvhNodesVisited);
+STAT_RATIO("BVH/Average Plane Intersection Tests per Ray", bvhPlaneIntersections, bvhtRays);
+STAT_RATIO("BVH/Average Triangle Intersection Tests per Ray", bvhTriangleIntersections, bvhRays1);
+STAT_COUNTER("BVH/Rays that Intersect the Geometry", bvhRaysIntersect);
 
 STAT_COUNTER("Accelerator/If 1 BVH, if 10 DST, if 100 WDST", testForDst);
 
@@ -48,6 +51,7 @@ STAT_COUNTER("DST/Carving Node Sets Size 2", dstSetsWithTwo);
 STAT_COUNTER("DST/Carving Node Sets Size 3", dstSetsWithThree);
 STAT_COUNTER("DST/Single-Axis Carving Nodes", singleAxisCNs);
 STAT_COUNTER("DST/Dual-Axis Carving Nodes", dualAxisCNs);
+STAT_COUNTER("DST/Rays that Intersect the Geometry", dstRaysIntersect);
 
 STAT_RATIO("WDST/Average Plane Intersection Tests per Ray", wdstPlaneIntersections, wdstRays);
 STAT_RATIO("WDST/Average Triangle Intersection Tests per Ray", wdstTriangleIntersections, wdstRays1);
@@ -64,6 +68,7 @@ STAT_COUNTER("WDST/Carving Node Sets Size 3", setsWithThree);
 STAT_COUNTER("WDST/Splitting Nodes Size Small", smallSplittingNodes)
 STAT_COUNTER("WDST/Splitting Nodes Size Medium", mediumSplittingNodes);
 STAT_COUNTER("WDST/Splitting Nodes Size Big", bigSplittingNodes);
+STAT_COUNTER("WDST/Rays that Intersect the Geometry", wdstRaysIntersect);
 
 
 uint32_t IS_LEAF = 0b00000100000000000000000000000000;
@@ -74,11 +79,11 @@ uint32_t CARVING_TYPE = 0b11100000000000000000000000000000;
 uint32_t OFFSET = 0b00000011111111111111111111111111;
 uint32_t CARVING_PLANE_AXES = SPLITTING_PLANE_AXIS;
 uint32_t CORNER_TYPE = CARVING_PLANE_AXIS;
-float TRAVERSAL_COST_DST_SN = 1.0;
-float TRAVERSAL_COST_WDST_SMALL_SN = 1.0;
-float TRAVERSAL_COST_WDST_MEDIUM_SN = 2.0;
-float TRAVERSAL_COST_WDST_BIG_SN = 3.0;
-float TRAVERSAL_COST_BVH_NODE = 3.0;
+float TRAVERSAL_COST_DST_SN = 0.5;
+float TRAVERSAL_COST_WDST_SMALL_SN = 0.5;
+float TRAVERSAL_COST_WDST_MEDIUM_SN = 1;
+float TRAVERSAL_COST_WDST_BIG_SN = 1.5;
+float TRAVERSAL_COST_BVH_NODE = 1.5;
 
 // MortonPrimitive Definition
 struct MortonPrimitive {
@@ -633,6 +638,10 @@ pstd::optional<ShapeIntersection> BVHAggregate::Intersect(const Ray &ray,
     pstd::optional<ShapeIntersection> si;
     Vector3f invDir(1 / ray.d.x, 1 / ray.d.y, 1 / ray.d.z);
     int dirIsNeg[3] = {int(invDir.x < 0), int(invDir.y < 0), int(invDir.z < 0)};
+    if (Bounds().IntersectP(ray.o, ray.d, tMax, invDir, dirIsNeg)) {
+        bvhRays1++;
+        bvhtRays++;
+    }
     // Follow ray through BVH nodes to find primitive intersections
     int toVisitOffset = 0, currentNodeIndex = 0;
     int nodesToVisit[64];
@@ -641,6 +650,7 @@ pstd::optional<ShapeIntersection> BVHAggregate::Intersect(const Ray &ray,
         ++nodesVisited;
         const LinearBVHNode *node = &nodes[currentNodeIndex];
         // Check ray against BVH node
+        bvhPlaneIntersections += 6;
         if (node->bounds.IntersectP(ray.o, ray.d, tMax, invDir, dirIsNeg)) {
             if (node->nPrimitives > 0) {
                 // Intersect ray with primitives in leaf BVH node
@@ -648,6 +658,7 @@ pstd::optional<ShapeIntersection> BVHAggregate::Intersect(const Ray &ray,
                     // Check for intersection with primitive in BVH node
                     pstd::optional<ShapeIntersection> primSi =
                         primitives[node->primitivesOffset + i].Intersect(ray, tMax);
+                    bvhTriangleIntersections++;
                     if (primSi) {
                         si = primSi;
                         tMax = si->tHit;
@@ -1497,7 +1508,10 @@ void DSTAggregate::FlattenDST(DSTBuildNode *node) {
             flag |= leftChildSize << 27;
             dstNumberOfSplittingNodes++;
         } else {
-            dstNumberOfCarvingNodes++;
+            if (node->isCarvingLeaf())
+                dstNumberOfLeafs++;
+            else 
+                dstNumberOfCarvingNodes++;
         }
         linearDST[offset] = flag;
         linearDST[offset + 1] = node->Plane1AsInt();
@@ -1533,8 +1547,6 @@ Bounds3f DSTAggregate::Bounds() const {
 
 pstd::optional<ShapeIntersection> DSTAggregate::Intersect(const Ray &ray,
                                                           Float globalTMax) const {
-    dstRays++;
-    dstRays1++;
     float delta = 0.001;
     pstd::optional<ShapeIntersection> si;
     // For code documentation look at DST supplemental materials Listing 7. DST Traversal Kernel
@@ -1550,6 +1562,8 @@ pstd::optional<ShapeIntersection> DSTAggregate::Intersect(const Ray &ray,
     const int dirSgn[3] = {invDir[0] < 0, invDir[1] < 0, invDir[2] < 0};
     if (!globalBB.IntersectP(ray.o, ray.d, tMax, invDir, dirSgn))
         return {};
+    dstRays++;
+    dstRays1++;
     if (tMin < 0)
         tMin = 0;
 
@@ -2882,8 +2896,6 @@ Bounds3f WDSTAggregate::Bounds() const {
 pstd::optional<ShapeIntersection> WDSTAggregate::Intersect(const Ray &ray,
                                                            Float globalTMax) const {
     float delta = 0.001;
-    wdstRays++;
-    wdstRays1++;
     pstd::optional<ShapeIntersection> si;
     float tMin = 0;
     float tMax = globalTMax;
@@ -2897,6 +2909,8 @@ pstd::optional<ShapeIntersection> WDSTAggregate::Intersect(const Ray &ray,
     const int dirSgn[3] = {invDir[0] < 0, invDir[1] < 0, invDir[2] < 0};
     if (!globalBB.IntersectP(ray.o, ray.d, tMax, invDir, dirSgn))
         return {};
+    wdstRays++;
+    wdstRays1++;
     if (tMin < 0)
         tMin = 0;
 
@@ -3768,7 +3782,10 @@ void WDSTAggregate::FlattenWDST(WDSTBuildNode *node) {
         linearWDST[offset + 2] = node->PlaneAsInt(1);
         if (node->children[0] != NULL)
             FlattenWDST(node->children[0]);
-        numberOfCarvingNodes++;
+        if (node->IsLeaf())
+            numberOfLeafs++;
+        else
+            numberOfCarvingNodes++;
     } else if (node->IsLeaf()) {
         linearWDST[offset] = node->header << 26 | node->triangleOffset;
         numberOfLeafs++;
