@@ -233,9 +233,9 @@ class WDSTAggregate {
 Bounds3f carve(Bounds3f parentBB, Bounds3f childBB, std::vector<int> sidesToCarve,
                std::vector<float> &planes);
 
-int getNTrianglesInSubTree(LinearBVHNode *nodes, int currentNodeIndex);
+bool isIn(std::vector<int> vector, int test);
 
-int getNTrianglesInSubTree(DSTBuildNode node);
+bool notEqual(Bounds3f first, Bounds3f second);
 
 }  // namespace pbrt
 
