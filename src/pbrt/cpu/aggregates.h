@@ -44,7 +44,6 @@ class BVHAggregate {
     LinearBVHNode* getNodes();
 
      // Stats for evaluation
-    float overallSAHCost;
     int numberOfNodes;
     std::list<int> triangleIntersectionsPerRay;
     std::list<int> planeIntersectionsPerRay;
@@ -194,7 +193,7 @@ class WDSTAggregate {
     bool IntersectP(const Ray &ray, Float tMax) const;
 
   private:
-    float calculateOverallSAH(WDSTBuildNode node, Bounds3f boundingBox, int depth);
+    double calculateOverallSAH(WDSTBuildNode node, Bounds3f boundingBox, int depth);
     static int reconstructTree(int index);
     WDSTBuildNode *BuildWDSTRecursively(ThreadLocal<Allocator> &threadAllocators, DSTBuildNode *splittingNode, float S, int currentDepth);
     void FlattenWDST(WDSTBuildNode *node);

@@ -29,7 +29,7 @@ STAT_MEMORY_COUNTER("Memory/WDST", wdstBytes);
 STAT_RATIO("BVH/Primitives per leaf node", totalPrimitives, totalLeafNodes);
 STAT_COUNTER("BVH/Interior nodes", interiorNodes);
 STAT_COUNTER("BVH/Leaf nodes", leafNodes);
-STAT_COUNTER("SAH/BVH Cost * 1000000", bvhOverallSAHCost);//TODO: count SAH
+//STAT_COUNTER("SAH/BVH Cost * 10", bvhOverallSAHCost);
 STAT_PIXEL_COUNTER("BVH/Nodes visited", bvhNodesVisited);
 STAT_RATIO("BVH/Average Plane Intersection Tests per Ray", bvhPlaneIntersections, bvhtRays);
 STAT_RATIO("BVH/Average Triangle Intersection Tests per Ray", bvhTriangleIntersections, bvhRays1);
@@ -39,7 +39,7 @@ STAT_COUNTER("Accelerator/If 1 BVH, if 10 DST, if 100 WDST", testForDst);
 
 STAT_RATIO("DST/Average Plane Intersection Tests per Ray", dstPlaneIntersections, dstRays);
 STAT_RATIO("DST/Average Triangle Intersection Tests per Ray", dstTriangleIntersections, dstRays1);
-STAT_COUNTER("SAH/DST Cost * 1000000", dstOverallSAHCost);
+//STAT_COUNTER("SAH/DST Cost * 10", dstOverallSAHCost);
 STAT_COUNTER("DST/Nodes", dstNumberOfNodes);
 STAT_COUNTER("DST/Splitting Nodes", dstNumberOfSplittingNodes);
 STAT_COUNTER("DST/Carving Nodes", dstNumberOfCarvingNodes);
@@ -55,7 +55,7 @@ STAT_COUNTER("DST/Rays that Intersect the Geometry", dstRaysIntersect);
 
 STAT_RATIO("WDST/Average Plane Intersection Tests per Ray", wdstPlaneIntersections, wdstRays);
 STAT_RATIO("WDST/Average Triangle Intersection Tests per Ray", wdstTriangleIntersections, wdstRays1);
-STAT_COUNTER("SAH/WDST Cost * 1000000", overallSAHCost);
+//STAT_COUNTER("SAH/WDST Cost * 10", overallSAHCost);
 STAT_COUNTER("WDST/Nodes", numberOfNodes);
 STAT_COUNTER("WDST/Splitting Nodes", numberOfSplittingNodes);
 STAT_COUNTER("WDST/Carving Nodes", numberOfCarvingNodes);
@@ -79,11 +79,11 @@ uint32_t CARVING_TYPE = 0b11100000000000000000000000000000;
 uint32_t OFFSET = 0b00000011111111111111111111111111;
 uint32_t CARVING_PLANE_AXES = SPLITTING_PLANE_AXIS;
 uint32_t CORNER_TYPE = CARVING_PLANE_AXIS;
-float TRAVERSAL_COST_DST_SN = 0.5;
-float TRAVERSAL_COST_WDST_SMALL_SN = 0.5;
-float TRAVERSAL_COST_WDST_MEDIUM_SN = 1;
-float TRAVERSAL_COST_WDST_BIG_SN = 1.5;
-float TRAVERSAL_COST_BVH_NODE = 1.5;
+float TRAVERSAL_COST_DST_SN = 0.3;
+float TRAVERSAL_COST_WDST_SMALL_SN = 0.3;
+float TRAVERSAL_COST_WDST_MEDIUM_SN = 0.6;
+float TRAVERSAL_COST_WDST_BIG_SN = 0.9;
+float TRAVERSAL_COST_BVH_NODE = 0.9;
 
 // MortonPrimitive Definition
 struct MortonPrimitive {
@@ -258,7 +258,7 @@ BVHAggregate::BVHAggregate(std::vector<Primitive> prims, int maxPrimsInNode,
     printBVH(*root);
     */
     float SAH = calculateOverallSAH(*root);
-    bvhOverallSAHCost = SAH * 1000000;
+    //bvhOverallSAHCost = SAH * 10;
 
     flattenBVH(root, &offset);
     CHECK_EQ(totalNodes.load(), offset);
@@ -430,9 +430,9 @@ BVHBuildNode *BVHAggregate::buildRecursive(ThreadLocal<Allocator> &threadAllocat
                                 return b <= minCostSplitBucket;
                             });
                         mid = midIter - bvhPrimitives.begin();
-                        bvhOverallSAHCost += minCost * 1000000;
+                        //bvhOverallSAHCost += minCost * 10;
                     } else {
-                        bvhOverallSAHCost += leafCost * 1000000;
+                        //bvhOverallSAHCost += leafCost * 10;
                         // Create leaf _BVHBuildNode_
                         int firstPrimOffset =
                             orderedPrimsOffset->fetch_add(bvhPrimitives.size());
@@ -1452,7 +1452,7 @@ DSTAggregate::DSTAggregate(std::vector<Primitive> prims, LinearBVHNode *BVHNodes
     std::cout << '\n' << '\n' << "Primitives in Tree:" << '\n';
     */
     float SAH = this->calculateOverallSAH(*root, globalBB, 0);
-    dstOverallSAHCost = SAH * 1000000;
+    //dstOverallSAHCost = SAH;
     
     dstBytes = offset * 4;
     linearDST.resize(offset);
@@ -1851,18 +1851,10 @@ bool DSTAggregate::IntersectP(const Ray &ray, Float globalTMax) const {
 
 float DSTAggregate::calculateOverallSAH(DSTBuildNode node, Bounds3f parentBoundingBox, int depth) {
     float SAH = 0.f;
-    //std::string out = "";
-    //for (int i = 0; i < depth; i++)
-        //out += "   ";
     Bounds3f boundingBox(parentBoundingBox);
     int header = (node.GetFlag() >> 27) & 15;
     if (node.IsLeaf()) {
         SAH = node.NTriangles();
-        //std::cout << out << "Leaf: " << node.offsetToFirstChild() << " " << boundingBox << '\n';
-        //std::cout << out << "      " << node.offsetToFirstChild() << " " << primitives[node.offsetToFirstChild()].Bounds().ToString() << '\n';
-        //if (notEqual(boundingBox, primitives[node.offsetToFirstChild()].Bounds())) {
-            //std::cout << "False Bounding Box for leaf: " << node.offsetToFirstChild() << '\n';
-        //}
     } else if (node.IsCarving()) {
         float traversalCost = 0.f;
         if (header >> 2 == 2) {
@@ -1954,14 +1946,6 @@ float DSTAggregate::calculateOverallSAH(DSTBuildNode node, Bounds3f parentBoundi
             }
         }
         if (node.isCarvingLeaf()) {
-            //if (notEqual(boundingBox, primitives[node.offsetToFirstChild()].Bounds())) {
-                //std::cout << "False Bounding Box for leaf: " << node.offsetToFirstChild() << '\n';
-                //std::cout << "Carving Leaf: " << node.offsetToFirstChild() << " "
-                //          << parentBoundingBox << '\n';
-                //std::cout << boundingBox << '\n';
-                //std::cout << primitives[node.offsetToFirstChild()].Bounds().ToString()
-                //          << '\n';
-            //}
             SAH = traversalCost + (boundingBox.SurfaceArea() / parentBoundingBox.SurfaceArea()) * node.NTriangles();
         } else {
             SAH = traversalCost + (boundingBox.SurfaceArea() / parentBoundingBox.SurfaceArea()) * calculateOverallSAH(*node.children[0], boundingBox, depth + 1);
@@ -2644,31 +2628,22 @@ WDSTAggregate::WDSTAggregate(std::vector<Primitive> prims, DSTBuildNode node, Bo
     }
     std::cout << '\n' << '\n' << "Primitives in Tree:" << '\n';*/
 
-    float SAH = this->calculateOverallSAH(*root, globalBB, 0);
-    overallSAHCost = SAH * 1000000;
+    //double SAH = this->calculateOverallSAH(*root, globalBB, 0);
+    //overallSAHCost = SAH;
 
     wdstBytes = offset * 4;
     linearWDST.resize(offset);
     FlattenWDST(root);
 }
 
-float WDSTAggregate::calculateOverallSAH(WDSTBuildNode node, Bounds3f parentBoundingBox, int depth) {
+double WDSTAggregate::calculateOverallSAH(WDSTBuildNode node, Bounds3f parentBoundingBox, int depth) {
     int header = node.header >> 1;
-    //std::string out = "";
-    //for (int i = 0; i < depth; i++)
-        //out += "   ";
     Bounds3f boundingBox(parentBoundingBox);
-    float SAH = 0.f;
+    double SAH = 0.f;
     if (node.IsLeaf() && !node.IsCarving()) {
-        //std::cout << out << "Leaf: " << node.offsetToFirstChild() << " " << boundingBox << '\n';
-        //std::cout << out << "      " << node.offsetToFirstChild() << " " << primitives[node.offsetToFirstChild()].Bounds().ToString() << '\n';
-        //std::cout << node.offsetToFirstChild() << " " << primitives[node.offsetToFirstChild()].Bounds().ToString() << '\n';
-        //if (notEqual(boundingBox, primitives[node.offsetToFirstChild()].Bounds())) {
-            //std::cout << "False Bounding Box for leaf: " << node.offsetToFirstChild() << '\n';
-        //}
         SAH = node.nPrimitives;
     } else if (node.IsCarving()) {
-        float traversalCost = 0.f;
+        double traversalCost = 0.f;
         if (((header >> 2) & 3) == 2) {
             traversalCost = 0.3;
             if ((header & 3) == 0) {
@@ -2786,7 +2761,7 @@ float WDSTAggregate::calculateOverallSAH(WDSTBuildNode node, Bounds3f parentBoun
             boundingBox2.pMin.z = node.planes[1];
         }
         if ((header & 3) == 0) {
-            float S = parentBoundingBox.SurfaceArea();
+            double S = parentBoundingBox.SurfaceArea();
             //std::cout << out << "Small Splitting Node: " << parentBoundingBox << '\n';
             SAH += TRAVERSAL_COST_WDST_SMALL_SN +
                    (boundingBox1.SurfaceArea() / S) * calculateOverallSAH(*node.children[0], boundingBox1, depth + 1) +
@@ -2805,7 +2780,7 @@ float WDSTAggregate::calculateOverallSAH(WDSTBuildNode node, Bounds3f parentBoun
                 boundingBox21.pMax.z = node.planes[4];
                 boundingBox22.pMin.z = node.planes[5];
             }
-            float S = parentBoundingBox.SurfaceArea();
+            double S = parentBoundingBox.SurfaceArea();
             //std::cout << out << "Medium Splitting Node: " << parentBoundingBox << '\n';
             SAH += TRAVERSAL_COST_WDST_MEDIUM_SN +
                    (boundingBox1.SurfaceArea() / S) * calculateOverallSAH(*node.children[0], boundingBox1, depth + 1) +
@@ -2825,7 +2800,7 @@ float WDSTAggregate::calculateOverallSAH(WDSTBuildNode node, Bounds3f parentBoun
                 boundingBox11.pMax.z = node.planes[2];
                 boundingBox12.pMin.z = node.planes[3];
             }
-            float S = parentBoundingBox.SurfaceArea();
+            double S = parentBoundingBox.SurfaceArea();
             //std::cout << out << "Medium Splitting Node: " << parentBoundingBox << '\n';
             SAH += TRAVERSAL_COST_WDST_MEDIUM_SN +
                    (boundingBox11.SurfaceArea() / S) * calculateOverallSAH(*node.children[0], boundingBox11, depth + 1) +
@@ -2858,7 +2833,7 @@ float WDSTAggregate::calculateOverallSAH(WDSTBuildNode node, Bounds3f parentBoun
                 boundingBox21.pMax.z = node.planes[4];
                 boundingBox22.pMin.z = node.planes[5];
             }
-            float S = parentBoundingBox.SurfaceArea();
+            double S = parentBoundingBox.SurfaceArea();
             //std::cout << out << "Big Splitting Node: " << parentBoundingBox << '\n';
             SAH += TRAVERSAL_COST_WDST_BIG_SN +
                    (boundingBox11.SurfaceArea() / S) * calculateOverallSAH(*node.children[0], boundingBox11, depth + 1) +
